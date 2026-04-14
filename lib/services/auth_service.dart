@@ -24,6 +24,7 @@ class AuthService {
       final response = LoginApiResponse.fromJson(jsonDecode(res.body));
 
       if (response.success && response.data != null) {
+        await _storage.write(key: 'user_id', value: response.data!.userId);
         await _storage.write(key: 'auth_token', value: response.data!.token);
         await _storage.write(key: 'user_role', value: response.data!.role);
         await _storage.write(key: 'user_email', value: response.data!.email);
@@ -86,6 +87,7 @@ class AuthService {
   }
 
   // ── HELPERS ────────────────────────────────────────────
+  Future<String?> getUserId() => _storage.read(key: 'user_id');
   Future<String?> getToken() => _storage.read(key: 'auth_token');
   Future<String?> getRole() => _storage.read(key: 'user_role');
   Future<String?> getUserName() => _storage.read(key: 'user_name');

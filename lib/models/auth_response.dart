@@ -1,4 +1,5 @@
 class LoginData {
+  final String userId;
   final String token;
   final String role;
   final String userName;
@@ -8,6 +9,7 @@ class LoginData {
   final String? tokenExpiry;
 
   LoginData({
+    required this.userId,
     required this.token,
     required this.role,
     required this.userName,
@@ -18,6 +20,7 @@ class LoginData {
   });
 
   factory LoginData.fromJson(Map<String, dynamic> json) => LoginData(
+    userId: json['userId']?.toString() ?? '',
     token: json['token'] ?? '',
     role: json['role'] ?? '',
     userName: json['userName'] ?? '',

@@ -9,27 +9,30 @@ class AuthProvider extends ChangeNotifier {
 
   bool _isLoading = false;
   bool _isLoggedIn = false;
+  String? _userId;
   String? _role;
   String? _userName;
   String? _fullName;
-  String? _userEmail; // ← ADDED
+  String? _userEmail;
   String? _errorMessage;
 
   bool get isLoading => _isLoading;
   bool get isLoggedIn => _isLoggedIn;
+  String? get userId => _userId;
   String? get role => _role;
   String? get userName => _userName;
   String? get fullName => _fullName;
-  String? get userEmail => _userEmail; // ← ADDED
+  String? get userEmail => _userEmail;
   String? get errorMessage => _errorMessage;
 
   Future<void> checkLoginStatus() async {
     _isLoggedIn = await _service.isLoggedIn();
     if (_isLoggedIn) {
+      _userId = await _service.getUserId();
       _role = await _service.getRole();
       _userName = await _service.getUserName();
       _fullName = await _service.getFullName();
-      _userEmail = await _service.getUserEmail(); // ← ADDED
+      _userEmail = await _service.getUserEmail();
     }
     notifyListeners();
   }
@@ -39,10 +42,11 @@ class AuthProvider extends ChangeNotifier {
     final response = await _service.login(request);
     if (response.success && response.data != null) {
       _isLoggedIn = true;
+      _userId = response.data!.userId;
       _role = response.data!.role;
       _userName = response.data!.userName;
       _fullName = response.data!.fullName;
-      _userEmail = response.data!.email; // ← ADDED
+      _userEmail = response.data!.email;
     } else {
       _errorMessage = response.message;
     }
@@ -62,10 +66,11 @@ class AuthProvider extends ChangeNotifier {
     _setLoading(true);
     await _service.logout();
     _isLoggedIn = false;
+    _userId = null;
     _role = null;
     _userName = null;
     _fullName = null;
-    _userEmail = null; // ← ADDED
+    _userEmail = null;
     _errorMessage = null;
     _setLoading(false);
   }
