@@ -14,7 +14,10 @@ class AuthService {
     try {
       final res = await http.post(
         Uri.parse(AppConstants.loginUrl),
-        headers: {'Content-Type': 'application/json'},
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Tenant': request.tenantIdentifier,
+        },
         body: jsonEncode(request.toJson()),
       );
 
