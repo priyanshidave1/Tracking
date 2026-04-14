@@ -258,10 +258,10 @@ class _TopBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       padding: EdgeInsets.only(
-        top: MediaQuery.of(context).padding.top + 10,
+        top: MediaQuery.of(context).padding.top + 8,
         bottom: 10,
-        left: 12,
-        right: 16,
+        left: 8,
+        right: 12,
       ),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -274,75 +274,105 @@ class _TopBar extends StatelessWidget {
           ),
         ],
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // Hamburger
-          Builder(
-            builder: (ctx) => IconButton(
-              icon: const Icon(
-                Icons.menu_rounded,
-                color: AppTheme.primary,
-                size: 26,
-              ),
-              onPressed: () => Scaffold.of(ctx).openDrawer(),
-            ),
-          ),
-          const SizedBox(width: 4),
-
-          // Terms + shift buttons
-          Expanded(
-            child: _ShiftControl(
-              termsAccepted: termsAccepted,
-              shiftActive: shiftActive,
-              elapsedLabel: elapsedLabel,
-              onTermsChanged: onTermsChanged,
-              onShiftStart: onShiftStart,
-              onShiftStop: onShiftStop,
-            ),
-          ),
-          const SizedBox(width: 12),
-
-          // Total hours
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            mainAxisSize: MainAxisSize.min,
+          // ── Row 1: Menu | Brand | Spacer | Total Hours | Avatar ──────────
+          Row(
             children: [
-              const Text(
-                'Total Shift Hours',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: AppTheme.textSecondary,
-                  fontWeight: FontWeight.w500,
+              Builder(
+                builder: (ctx) => IconButton(
+                  icon: const Icon(
+                    Icons.menu_rounded,
+                    color: AppTheme.primary,
+                    size: 24,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 36,
+                  ),
+                  onPressed: () => Scaffold.of(ctx).openDrawer(),
                 ),
               ),
-              Text(
-                totalLabel,
-                style: const TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
+              const SizedBox(width: 6),
+              Container(
+                width: 26,
+                height: 26,
+                decoration: BoxDecoration(
                   color: AppTheme.primary,
-                  letterSpacing: 1,
+                  borderRadius: BorderRadius.circular(7),
+                ),
+                child: const Icon(
+                  Icons.badge_rounded,
+                  color: Colors.white,
+                  size: 14,
+                ),
+              ),
+              const SizedBox(width: 7),
+              const Text(
+                'AP Cabinet',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: AppTheme.primary,
+                  letterSpacing: -0.2,
+                ),
+              ),
+              const Spacer(),
+              // Total shift hours block
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Total Shift Hours',
+                    style: TextStyle(
+                      fontSize: 9,
+                      color: AppTheme.textSecondary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  Text(
+                    totalLabel,
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      color: AppTheme.primary,
+                      letterSpacing: 1.2,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 10),
+              GestureDetector(
+                onTap: onAvatarTap,
+                child: CircleAvatar(
+                  radius: 16,
+                  backgroundColor: AppTheme.primary,
+                  child: Text(
+                    initial,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(width: 12),
 
-          // Avatar
-          GestureDetector(
-            onTap: onAvatarTap,
-            child: CircleAvatar(
-              radius: 18,
-              backgroundColor: AppTheme.primary,
-              child: Text(
-                initial,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
+          const SizedBox(height: 8),
+
+          // ── Row 2: Full-width shift controls ─────────────────────────────
+          _ShiftControl(
+            termsAccepted: termsAccepted,
+            shiftActive: shiftActive,
+            elapsedLabel: elapsedLabel,
+            onTermsChanged: onTermsChanged,
+            onShiftStart: onShiftStart,
+            onShiftStop: onShiftStop,
           ),
         ],
       ),
@@ -370,77 +400,94 @@ class _ShiftControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: AppTheme.surface,
         borderRadius: BorderRadius.circular(30),
         border: Border.all(color: AppTheme.border),
       ),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          // Terms checkbox
-          if (!shiftActive) ...[
-            SizedBox(
-              width: 20,
-              height: 20,
-              child: Checkbox(
-                value: termsAccepted,
-                onChanged: onTermsChanged,
-                activeColor: AppTheme.primary,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(4),
+          // Left: terms checkbox OR live timer
+          if (!shiftActive)
+            Flexible(
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: Checkbox(
+                      value: termsAccepted,
+                      onChanged: onTermsChanged,
+                      activeColor: AppTheme.primary,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      side: const BorderSide(
+                        color: AppTheme.primary,
+                        width: 1.5,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  GestureDetector(
+                    onTap: () => _showTermsDialog(context),
+                    child: const Text(
+                      'Accept terms & conditions',
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: AppTheme.primary,
+                        decoration: TextDecoration.underline,
+                        decorationColor: AppTheme.primary,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(
+                  Icons.timer_rounded,
+                  color: AppTheme.success,
+                  size: 15,
                 ),
-                side: const BorderSide(color: AppTheme.primary, width: 1.5),
-              ),
-            ),
-            const SizedBox(width: 6),
-            GestureDetector(
-              onTap: () => _showTermsDialog(context),
-              child: const Text(
-                'Accept terms\n& conditions',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: AppTheme.primary,
-                  decoration: TextDecoration.underline,
-                  height: 1.3,
+                const SizedBox(width: 4),
+                Text(
+                  elapsedLabel,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: AppTheme.success,
+                    letterSpacing: 0.8,
+                    fontFamily: 'Courier',
+                  ),
                 ),
-              ),
+              ],
             ),
-            const SizedBox(width: 10),
-          ],
 
-          // Elapsed (when active)
-          if (shiftActive) ...[
-            const Icon(Icons.timer_rounded, color: AppTheme.success, size: 16),
-            const SizedBox(width: 4),
-            Text(
-              elapsedLabel,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.bold,
-                color: AppTheme.success,
-                letterSpacing: 1,
+          // Right: Start + Stop buttons
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _ShiftBtn(
+                label: 'Shift Start',
+                active: !shiftActive,
+                onTap: onShiftStart,
+                activeColor: AppTheme.success,
               ),
-            ),
-            const SizedBox(width: 10),
-          ],
-
-          // Shift Start
-          _ShiftBtn(
-            label: 'Shift Start',
-            active: !shiftActive,
-            onTap: onShiftStart,
-            activeColor: AppTheme.success,
-          ),
-          const SizedBox(width: 6),
-
-          // Shift Stop
-          _ShiftBtn(
-            label: 'Shift Stop',
-            active: shiftActive,
-            onTap: onShiftStop,
-            activeColor: AppTheme.error,
+              const SizedBox(width: 6),
+              _ShiftBtn(
+                label: 'Shift Stop',
+                active: shiftActive,
+                onTap: onShiftStop,
+                activeColor: AppTheme.error,
+              ),
+            ],
           ),
         ],
       ),
@@ -1004,7 +1051,7 @@ class _TimesheetSection extends StatelessWidget {
 
           // Table header
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
             decoration: const BoxDecoration(
               color: Color(0xFFFAF0F1),
               border: Border.symmetric(
@@ -1013,10 +1060,10 @@ class _TimesheetSection extends StatelessWidget {
             ),
             child: const Row(
               children: [
-                _ColHead(label: 'Date', flex: 2),
-                _ColHead(label: 'Start Time', flex: 2),
-                _ColHead(label: 'End Time', flex: 2),
-                _ColHead(label: 'Total Hours', flex: 1, center: true),
+                _ColHead(label: 'Date', flex: 3),
+                _ColHead(label: 'Start Time', flex: 3),
+                _ColHead(label: 'End Time', flex: 3),
+                _ColHead(label: 'Hrs', flex: 2, center: true),
               ],
             ),
           ),
@@ -1146,7 +1193,7 @@ class _ShiftRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       decoration: BoxDecoration(
         color: isAlternate ? const Color(0xFFFCFCFC) : Colors.white,
         border: isLastInGroup
@@ -1158,34 +1205,32 @@ class _ShiftRow extends StatelessWidget {
       child: Row(
         children: [
           Expanded(
-            flex: 2,
+            flex: 3,
             child: Text(
               date,
               style: const TextStyle(
-                fontSize: 13,
+                fontSize: 12,
                 fontWeight: FontWeight.w600,
                 color: AppTheme.textPrimary,
               ),
             ),
           ),
-          Expanded(flex: 2, child: _TimeCell(time: entry.startTime)),
-          Expanded(flex: 2, child: _TimeCell(time: entry.endTime)),
+          Expanded(flex: 3, child: _TimeCell(time: entry.startTime)),
+          Expanded(flex: 3, child: _TimeCell(time: entry.endTime)),
           Expanded(
-            flex: 1,
+            flex: 2,
             child: Center(
               child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 10,
-                  vertical: 4,
-                ),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                 decoration: BoxDecoration(
                   color: AppTheme.primary.withOpacity(0.08),
                   borderRadius: BorderRadius.circular(6),
                 ),
                 child: Text(
                   entry.totalHours,
+                  textAlign: TextAlign.center,
                   style: const TextStyle(
-                    fontSize: 12,
+                    fontSize: 11,
                     fontWeight: FontWeight.w700,
                     color: AppTheme.primary,
                   ),
@@ -1206,16 +1251,19 @@ class _TimeCell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          time,
-          style: const TextStyle(fontSize: 13, color: AppTheme.textSecondary),
+        Flexible(
+          child: Text(
+            time,
+            style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+          ),
         ),
-        const SizedBox(width: 4),
+        const SizedBox(width: 3),
         const Icon(
           Icons.location_on_rounded,
           color: AppTheme.primary,
-          size: 14,
+          size: 12,
         ),
       ],
     );
