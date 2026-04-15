@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:my_app/services/tracking_service.dart';
 import 'package:provider/provider.dart';
 import '../models/shift_entry.dart'; // adjust path
 import '../providers/auth_provider.dart';
@@ -8,7 +10,10 @@ import '../utils/app_theme.dart';
 import 'login_screen.dart';
 
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+  final String staffId;
+  final String shiftId;
+
+  const HomeScreen({super.key, required this.staffId, required this.shiftId});
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -17,10 +22,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   // ── Shift state ────────────────────────────────────────────────────────────
   bool _termsAccepted = false;
   bool _shiftActive = false;
+  bool _isLoading = false;
   DateTime? _shiftStart;
   String _elapsedLabel = '00:00:00';
   Timer? _timer;
   Duration _totalToday = Duration.zero;
+
+  // Live position from TrackingService callbacks
+  double? _liveLatitude;
+  double? _liveLongitude;
 
   // ── Filter ─────────────────────────────────────────────────────────────────
   final _dateCtrl = TextEditingController();
@@ -75,7 +85,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     return '$h:$m:$s';
   }
 
-  void _startShift() {
+  /// Called by TrackingService every 5 s with the latest GPS position.
+  void _onNewPosition(Position pos) {
+    if (!mounted) return;
+    setState(() {
+      _liveLatitude = pos.latitude;
+      _liveLongitude = pos.longitude;
+    });
+  }
+
+  // ── Shift start ────────────────────────────────────────────────────────────
+
+  Future<void> _startShift() async {
     if (!_termsAccepted) {
       AppToast.show(
         context,
@@ -84,36 +105,86 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       );
       return;
     }
-    setState(() {
-      _shiftActive = true;
+
+    setState(() => _isLoading = true);
+
+    try {
+      await TrackingService.startShift(
+        staffId: widget.staffId,
+        shiftId: widget.shiftId,
+        onLocation: _onNewPosition,
+      );
+
       _shiftStart = DateTime.now();
-    });
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
-      setState(() {
-        _elapsedLabel = _fmtDuration(DateTime.now().difference(_shiftStart!));
+
+      // Tick the elapsed counter every second.
+      _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!mounted || _shiftStart == null) return;
+        setState(() {
+          _elapsedLabel = _fmtDuration(DateTime.now().difference(_shiftStart!));
+        });
       });
-    });
-    AppToast.show(
-      context,
-      'Shift started — location tracking active.',
-      isSuccess: true,
-    );
+
+      setState(() {
+        _shiftActive = true;
+        _isLoading = false;
+      });
+
+      if (mounted) {
+        AppToast.show(
+          context,
+          'Shift started — location tracking active.',
+          isSuccess: true,
+        );
+      }
+    } catch (e) {
+      setState(() => _isLoading = false);
+      debugPrint('HomeScreen: Failed to start shift → $e');
+      if (mounted) {
+        AppToast.show(context, 'Failed to start shift: $e', isError: true);
+      }
+    }
   }
 
-  void _stopShift() {
-    _timer?.cancel();
-    final elapsed = DateTime.now().difference(_shiftStart!);
-    setState(() {
-      _shiftActive = false;
-      _elapsedLabel = '00:00:00';
-      _totalToday += elapsed;
-    });
-    AppToast.show(
-      context,
-      'Shift ended. Duration: ${_fmtDuration(elapsed)}',
-      isSuccess: true,
-    );
+  // ── Shift stop ─────────────────────────────────────────────────────────────
+
+  Future<void> _stopShift() async {
+    setState(() => _isLoading = true);
+
+    try {
+      await TrackingService.stopShift(staffId: widget.staffId);
+
+      _timer?.cancel();
+      _timer = null;
+
+      final elapsed = _shiftStart != null
+          ? DateTime.now().difference(_shiftStart!)
+          : Duration.zero;
+
+      setState(() {
+        _shiftActive = false;
+        _isLoading = false;
+        _elapsedLabel = '00:00:00';
+        _totalToday += elapsed;
+        _shiftStart = null;
+        _liveLatitude = null;
+        _liveLongitude = null;
+      });
+
+      if (mounted) {
+        AppToast.show(
+          context,
+          'Shift ended. Duration: ${_fmtDuration(elapsed)}',
+          isSuccess: true,
+        );
+      }
+    } catch (e) {
+      setState(() => _isLoading = false);
+      debugPrint('HomeScreen: Failed to stop shift → $e');
+      if (mounted) {
+        AppToast.show(context, 'Failed to stop shift: $e', isError: true);
+      }
+    }
   }
 
   void _searchByDate() {

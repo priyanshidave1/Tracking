@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'providers/auth_provider.dart';
@@ -5,9 +7,19 @@ import 'screens/login_screen.dart';
 import 'screens/home_screen.dart';
 
 void main() {
+  HttpOverrides.global = _DevHttpOverrides();
   runApp(
     ChangeNotifierProvider(create: (_) => AuthProvider(), child: const MyApp()),
   );
+}
+
+class _DevHttpOverrides extends HttpOverrides {
+  @override
+  HttpClient createHttpClient(SecurityContext? context) {
+    return super.createHttpClient(context)
+      ..badCertificateCallback =
+          (X509Certificate cert, String host, int port) => true;
+  }
 }
 
 class MyApp extends StatelessWidget {
@@ -33,6 +45,8 @@ class _StartupRouter extends StatefulWidget {
 
 class _StartupRouterState extends State<_StartupRouter> {
   bool _checking = true;
+  static const _demoStaffId = 'c2910399-21aa-4045-09a8-08de1d07c9ad';
+  static const _demoShiftId = 'c2910399-21aa-4045-09a8-08de1d07c9ad';
 
   @override
   void initState() {
@@ -51,7 +65,7 @@ class _StartupRouterState extends State<_StartupRouter> {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
     return context.watch<AuthProvider>().isLoggedIn
-        ? const HomeScreen()
+        ? const HomeScreen(staffId: _demoStaffId, shiftId: _demoShiftId)
         : const LoginScreen();
   }
 }
