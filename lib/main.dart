@@ -45,9 +45,6 @@ class _StartupRouter extends StatefulWidget {
 
 class _StartupRouterState extends State<_StartupRouter> {
   bool _checking = true;
-  static const _demoStaffId = 'c2910399-21aa-4045-09a8-08de1d07c9ad';
-  static const _demoShiftId = 'c2910399-21aa-4045-09a8-08de1d07c9ad';
-
   @override
   void initState() {
     super.initState();
@@ -64,8 +61,11 @@ class _StartupRouterState extends State<_StartupRouter> {
     if (_checking) {
       return const Scaffold(body: Center(child: CircularProgressIndicator()));
     }
-    return context.watch<AuthProvider>().isLoggedIn
-        ? const HomeScreen(staffId: _demoStaffId, shiftId: _demoShiftId)
-        : const LoginScreen();
+    final auth = context.watch<AuthProvider>();
+    if (auth.isLoggedIn) {
+      return HomeScreen(staffId: auth.userId!);
+    } else {
+      return const LoginScreen();
+    }
   }
 }

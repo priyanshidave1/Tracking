@@ -1,4 +1,3 @@
-// lib/services/signalr_service.dart
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:signalr_netcore/signalr_client.dart';
@@ -18,13 +17,25 @@ class SignalRService {
   bool _isConnected = false;
   String? _currentStaffId;
 
+  bool get isConnected => _isConnected;
+  String? get currentStaffId => _currentStaffId;
+
   Future<void> connect(String staffId) async {
+    // Already connected for the same staff → skip
+    if (_isConnected && _currentStaffId == staffId) {
+      debugPrint('SignalR already connected for $staffId');
+      return;
+    }
+
+    // Different staff connected → disconnect first
+    if (_isConnected) await disconnect();
+
     HttpOverrides.global = _DevHttpOverrides();
 
     final options = HttpConnectionOptions(
       transport: HttpTransportType.WebSockets,
       skipNegotiation: false,
-      logMessageContent: true,
+      logMessageContent: kDebugMode,
     );
 
     _hubConnection = HubConnectionBuilder()
@@ -33,19 +44,17 @@ class SignalRService {
         .build();
 
     _hubConnection!.onreconnecting(({error}) {
-      debugPrint("SignalR Reconnecting... $error");
+      debugPrint('⚡ SignalR reconnecting... $error');
       _isConnected = false;
     });
 
     _hubConnection!.onreconnected(({connectionId}) {
-      debugPrint("SignalR Reconnected ✅ $connectionId");
+      debugPrint('✅ SignalR reconnected: $connectionId');
       _isConnected = true;
-      // Re-register after reconnection
-      _registerWithBackend(staffId);
     });
 
     _hubConnection!.onclose(({error}) {
-      debugPrint("SignalR Closed ❌ $error");
+      debugPrint('❌ SignalR closed: $error');
       _isConnected = false;
     });
 
@@ -53,53 +62,49 @@ class SignalRService {
       await _hubConnection!.start();
       _isConnected = true;
       _currentStaffId = staffId;
-      debugPrint("✅ Connected to: ${AppConfig.hubUrl}");
-
-      await _registerWithBackend(staffId);
+      debugPrint('✅ SignalR connected → ${AppConfig.hubUrl}');
     } catch (e) {
-      debugPrint("❌ Connection failed: $e");
+      debugPrint('❌ SignalR connect failed: $e');
       _isConnected = false;
+      rethrow;
     }
   }
 
-  Future<void> _registerWithBackend(String staffId) async {
-    if (_hubConnection?.state == HubConnectionState.Connected) {
-      try {
-        // Note: Your backend doesn't have a RegisterClient method
-        // The backend gets user info from the authenticated connection
-        // So we just need to ensure the connection is authenticated
-        debugPrint("✅ Connected and ready for staff: $staffId");
-      } catch (e) {
-        debugPrint("❌ Registration failed: $e");
-      }
-    }
+  /// Ensures connection is alive; reconnects if not.
+  Future<void> ensureConnected(String staffId) async {
+    if (_hubConnection?.state == HubConnectionState.Connected) return;
+    debugPrint('SignalR not connected — attempting reconnect for $staffId');
+    await connect(staffId);
   }
 
-  // Updated to match backend's SendLocation method signature
   Future<void> sendLocation({
     required String staffId,
     required double lat,
     required double lng,
-    String? shiftId,
+    required String shiftId,
   }) async {
+    // Try to restore connection if lost (handles background resume)
+    if (_hubConnection?.state != HubConnectionState.Connected) {
+      await ensureConnected(staffId);
+    }
+
     if (_hubConnection?.state == HubConnectionState.Connected) {
       try {
-        // Match backend signature: SendLocation(double latitude, double longitude, string? shiftId = null)
-        await _hubConnection!.invoke("SendLocation", args: [lat, lng]);
-        debugPrint("✅ Location sent: ($lat, $lng)");
+        await _hubConnection!.invoke('SendLocation', args: [shiftId, lat, lng]);
+        debugPrint('📍 Location sent: ($lat, $lng)');
       } catch (e) {
-        debugPrint("❌ Send location failed: $e");
+        debugPrint('❌ sendLocation failed: $e');
       }
     } else {
-      debugPrint("⚠️ Not connected, skipping location send");
+      debugPrint('⚠️ SignalR unavailable — location not sent');
     }
   }
 
-  bool get isConnected => _isConnected;
-
   Future<void> disconnect() async {
     await _hubConnection?.stop();
+    _hubConnection = null;
     _isConnected = false;
     _currentStaffId = null;
+    debugPrint('🔌 SignalR disconnected');
   }
 }

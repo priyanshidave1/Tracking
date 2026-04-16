@@ -11,9 +11,8 @@ import 'login_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final String staffId;
-  final String shiftId;
 
-  const HomeScreen({super.key, required this.staffId, required this.shiftId});
+  const HomeScreen({super.key, required this.staffId});
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
@@ -22,7 +21,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   // ── Shift state ────────────────────────────────────────────────────────────
   bool _termsAccepted = false;
   bool _shiftActive = false;
-  bool _isLoading = false;
   DateTime? _shiftStart;
   String _elapsedLabel = '00:00:00';
   Timer? _timer;
@@ -106,12 +104,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       return;
     }
 
-    setState(() => _isLoading = true);
-
     try {
       await TrackingService.startShift(
         staffId: widget.staffId,
-        shiftId: widget.shiftId,
+        shiftId: '',
         onLocation: _onNewPosition,
       );
 
@@ -127,7 +123,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
       setState(() {
         _shiftActive = true;
-        _isLoading = false;
       });
 
       if (mounted) {
@@ -138,7 +133,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       }
     } catch (e) {
-      setState(() => _isLoading = false);
       debugPrint('HomeScreen: Failed to start shift → $e');
       if (mounted) {
         AppToast.show(context, 'Failed to start shift: $e', isError: true);
@@ -149,8 +143,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   // ── Shift stop ─────────────────────────────────────────────────────────────
 
   Future<void> _stopShift() async {
-    setState(() => _isLoading = true);
-
     try {
       await TrackingService.stopShift(staffId: widget.staffId);
 
@@ -163,7 +155,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
       setState(() {
         _shiftActive = false;
-        _isLoading = false;
         _elapsedLabel = '00:00:00';
         _totalToday += elapsed;
         _shiftStart = null;
@@ -179,7 +170,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       }
     } catch (e) {
-      setState(() => _isLoading = false);
       debugPrint('HomeScreen: Failed to stop shift → $e');
       if (mounted) {
         AppToast.show(context, 'Failed to stop shift: $e', isError: true);
@@ -1151,7 +1141,7 @@ class _TimesheetSection extends StatelessWidget {
               ),
             )
           else
-            ...displayed.expand((g) => _buildGroup(context, g)).toList(),
+            ...displayed.expand((g) => _buildGroup(context, g)),
 
           // Footer
           Container(

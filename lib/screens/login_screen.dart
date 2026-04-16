@@ -25,9 +25,6 @@ class _LoginScreenState extends State<LoginScreen>
   late Animation<double> _fadeAnim;
   late Animation<Offset> _slideAnim;
 
-  static const _demoStaffId = 'c2910399-21aa-4045-09a8-08de1d07c9ad';
-  static const _demoShiftId = 'c2910399-21aa-4045-09a8-08de1d07c9ad';
-
   @override
   void initState() {
     super.initState();
@@ -73,12 +70,13 @@ class _LoginScreenState extends State<LoginScreen>
       );
       await Future.delayed(const Duration(milliseconds: 600));
       if (!mounted) return;
+
+      final auth = context.read<AuthProvider>();
+      final actualStaffId = auth.staffId ?? '';
+
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(
-          builder: (_) =>
-              const HomeScreen(staffId: _demoStaffId, shiftId: _demoShiftId),
-        ),
+        MaterialPageRoute(builder: (_) => HomeScreen(staffId: actualStaffId)),
       );
     } else {
       AppToast.show(

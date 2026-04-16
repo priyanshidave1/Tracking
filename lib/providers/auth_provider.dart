@@ -9,6 +9,7 @@ class AuthProvider extends ChangeNotifier {
 
   bool _isLoading = false;
   bool _isLoggedIn = false;
+  String? staffId;
   String? _userId;
   String? _role;
   String? _userName;
@@ -43,6 +44,7 @@ class AuthProvider extends ChangeNotifier {
     if (response.success && response.data != null) {
       _isLoggedIn = true;
       _userId = response.data!.userId;
+      staffId = response.data!.userId.toString();
       _role = response.data!.role;
       _userName = response.data!.userName;
       _fullName = response.data!.fullName;
