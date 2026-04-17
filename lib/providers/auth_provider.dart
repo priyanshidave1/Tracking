@@ -41,6 +41,7 @@ class AuthProvider extends ChangeNotifier {
   Future<LoginApiResponse> login(LoginRequest request) async {
     _setLoading(true);
     final response = await _service.login(request);
+    debugPrint('login caLLED');
     if (response.success && response.data != null) {
       _isLoggedIn = true;
       _userId = response.data!.userId;
