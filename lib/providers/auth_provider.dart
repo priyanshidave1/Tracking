@@ -16,10 +16,12 @@ class AuthProvider extends ChangeNotifier {
   String? _fullName;
   String? _userEmail;
   String? _errorMessage;
+  String? _tenantIdentifier;
 
   bool get isLoading => _isLoading;
   bool get isLoggedIn => _isLoggedIn;
   String? get userId => _userId;
+  String? get tenantIdentifier => _tenantIdentifier;
   String? get role => _role;
   String? get userName => _userName;
   String? get fullName => _fullName;
@@ -41,7 +43,7 @@ class AuthProvider extends ChangeNotifier {
   Future<LoginApiResponse> login(LoginRequest request) async {
     _setLoading(true);
     final response = await _service.login(request);
-    debugPrint('login caLLED');
+    debugPrint('login called');
     if (response.success && response.data != null) {
       _isLoggedIn = true;
       _userId = response.data!.userId;
@@ -50,6 +52,7 @@ class AuthProvider extends ChangeNotifier {
       _userName = response.data!.userName;
       _fullName = response.data!.fullName;
       _userEmail = response.data!.email;
+      _tenantIdentifier = request.tenantIdentifier.toString();
     } else {
       _errorMessage = response.message;
     }
@@ -70,6 +73,7 @@ class AuthProvider extends ChangeNotifier {
     await _service.logout();
     _isLoggedIn = false;
     _userId = null;
+    _tenantIdentifier = null;
     _role = null;
     _userName = null;
     _fullName = null;

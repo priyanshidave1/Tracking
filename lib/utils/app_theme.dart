@@ -46,6 +46,18 @@ class AppTheme {
       prefixIconColor: textSecondary,
     ),
   );
+
+  static ThemeData get lightTheme {
+    return ThemeData(
+      primarySwatch: Colors.blue,
+      scaffoldBackgroundColor: Colors.white,
+      appBarTheme: const AppBarTheme(
+        backgroundColor: Colors.blue,
+        foregroundColor: Colors.white,
+      ),
+    );
+  }
+
 }
 
 // ── Toast ────────────────────────────────────────────────────────────────────

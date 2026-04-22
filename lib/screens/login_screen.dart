@@ -73,10 +73,12 @@ class _LoginScreenState extends State<LoginScreen>
 
       final auth = context.read<AuthProvider>();
       final actualStaffId = auth.staffId ?? '';
+      final UserName = auth.userName?? '';
+      final tenantIdentifier = _tenantCtrl.text.trim();
 
       Navigator.pushReplacement(
         context,
-        MaterialPageRoute(builder: (_) => HomeScreen(staffId: actualStaffId)),
+        MaterialPageRoute(builder: (_) => HomeScreen(staffId: actualStaffId , userName:UserName, tenantIdentifier : tenantIdentifier)),
       );
     } else {
       AppToast.show(

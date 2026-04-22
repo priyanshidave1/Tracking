@@ -1,22 +1,55 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:geolocator/geolocator.dart';
-import 'api_service.dart';
-import 'signalr_service.dart';
-import 'background_location_service.dart';
+import 'package:my_app/screens/location_storage.dart';
+import 'package:my_app/services/OfflineSyncService.dart';
 
+import 'api_service.dart';
+import 'auth_service.dart';
+import 'background_location_service.dart';
+import 'signalr_service.dart';
+
+/// Global in-memory shift state shared between [TrackingService] and the UI.
 class AppState {
   static String staffTimeTrackerId = '';
-  static String currentShiftId = '';
+}
+
+// ── Location Accuracy Config ──────────────────────────────────────────────────
+class _LocationConfig {
+  static const LocationAccuracy accuracy = LocationAccuracy.bestForNavigation;
+  static const Duration pollInterval = Duration(seconds: 5);
+
+  // FIX: Raised from 25 m → 50 m.
+  //
+  // 25 m was rejecting valid GPS fixes near buildings and at intersections
+  // (exactly where turns happen).  50 m still filters obviously bad locks
+  // while preserving the turn points that make the route look correct.
+  static const double maxAcceptableAccuracy = 50.0;
+
+  static const double minDistanceFilter = 5.0;
+  static const LocationSettings initialPositionSettings = LocationSettings(
+    accuracy: LocationAccuracy.bestForNavigation,
+    timeLimit: Duration(seconds: 20),
+  );
 }
 
 class TrackingService {
-  // ── Foreground-only state (used when app is in foreground) ─────────────────
+  TrackingService._();
+
+  // ── Public position stream ─────────────────────────────────────────────────
+  static final StreamController<Position> _positionCtrl =
+  StreamController<Position>.broadcast();
+  static Stream<Position> get positionStream => _positionCtrl.stream;
+
+  // ── Foreground-only state ──────────────────────────────────────────────────
   static Timer? _locationTimer;
+  static StreamSubscription? _bgEventSub;
   static SignalRService? _signalRService;
+  static Position? _lastEmittedPosition;
 
   static SignalRService get signalR {
     _signalRService ??= SignalRService();
@@ -26,17 +59,29 @@ class TrackingService {
   // ── Start Shift ────────────────────────────────────────────────────────────
   static Future<void> startShift({
     required String staffId,
-    required String shiftId,
+    required String userName,
+    required String tenantIdentifier,
     required void Function(Position) onLocation,
   }) async {
     await _ensureLocationPermission();
 
-    final Position initial = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
-    );
-    final String now = DateTime.now().toIso8601String();
+    final Position initial = await _getBestCurrentPosition();
+    final DateTime shiftStartDt = DateTime.now();
+    final String now = shiftStartDt.toIso8601String();
 
-    // 1️⃣ Call API to register shift
+    debugPrint(
+      '📍 Initial fix: ${initial.latitude}, ${initial.longitude} '
+          '± ${initial.accuracy.toStringAsFixed(1)}m',
+    );
+
+    // ── 1. Get JWT token ──────────────────────────────────────────────────────
+    final authService = AuthService();
+    final String? token = await authService.getToken();
+    if (token == null || token.isEmpty) {
+      throw Exception('No auth token found. Please log in again.');
+    }
+
+    // ── 2. Register shift via API ─────────────────────────────────────────────
     final response = await ApiService.post(
       'Franchise/api/StaffTimesheet/add-edit-staff-time-tracker',
       {
@@ -62,105 +107,199 @@ class TrackingService {
     }
 
     AppState.staffTimeTrackerId = response['data'].toString();
-    AppState.currentShiftId = shiftId;
 
-    // 2️⃣ Connect SignalR in foreground (for immediate response)
+    // ── 3. Persist shift metadata & reset route storage ───────────────────────
+    await LocationStorage.saveActiveShift(
+      shiftId: AppState.staffTimeTrackerId,
+      startTime: shiftStartDt,
+    );
+    await LocationStorage.saveShiftStartPosition(
+      lat: initial.latitude,
+      lng: initial.longitude,
+    );
+    await LocationStorage.clearPoints();
+
+    // ── 4. Persist & broadcast initial position ───────────────────────────────
+    await LocationStorage.appendPoint(RoutePoint(
+      lat: initial.latitude,
+      lng: initial.longitude,
+      timestamp: shiftStartDt,
+    ));
+    _lastEmittedPosition = initial;
+    onLocation(initial);
+    _positionCtrl.add(initial);
+
+    // ── 5. Connect SignalR ────────────────────────────────────────────────────
     try {
-      await signalR.connect(staffId);
+      await signalR.connect(staffId, token: token);
       debugPrint('✅ Foreground SignalR connected');
     } catch (e) {
-      debugPrint('⚠️ Foreground SignalR failed: $e — background will retry');
+      debugPrint('⚠️ Foreground SignalR connect failed: $e');
     }
 
-    // 3️⃣ Immediately report initial position to UI
-    onLocation(initial);
-
-    // Send initial location via SignalR
     await signalR.sendLocation(
       staffId: staffId,
       lat: initial.latitude,
       lng: initial.longitude,
-      shiftId: AppState.currentShiftId,
+      shiftId: AppState.staffTimeTrackerId,
+      userName: userName,
+      tenantIdentifier: tenantIdentifier,
     );
 
-    // 4️⃣ Start background service (handles minimized state)
-    // 4️⃣ Start background service (Android/iOS only)
+    // ── 6. Start background service ───────────────────────────────────────────
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       final bgService = FlutterBackgroundService();
       await bgService.startService();
       bgService.invoke(kActionStartTracking, {
         'staffId': staffId,
-        'shiftId': shiftId,
+        'shiftId': AppState.staffTimeTrackerId,
+        'token': token,
+        'userName': userName,
+        'tenantIdentifier': tenantIdentifier,
+        'minDistanceFilter': _LocationConfig.minDistanceFilter,
+        // Pass the raised threshold so the BG service is consistent
+        'maxAccuracy': _LocationConfig.maxAcceptableAccuracy,
       });
       debugPrint('✅ Background service started');
 
-      FlutterBackgroundService().on(kEventLocationUpdate).listen((data) {
+      // ── 7. Forward background events to stream ────────────────────────────
+      _bgEventSub?.cancel();
+      _bgEventSub = FlutterBackgroundService()
+          .on(kEventLocationUpdate)
+          .listen((data) {
         if (data == null) return;
-        debugPrint('📍 Background update: ${data['lat']}, ${data['lng']}');
+        final lat = (data['lat'] as num).toDouble();
+        final lng = (data['lng'] as num).toDouble();
+        final acc = data['accuracy'] != null
+            ? (data['accuracy'] as num).toDouble()
+            : 0.0;
+
+        debugPrint('📍 BG update: $lat, $lng ± ${acc.toStringAsFixed(1)}m');
+
+        final pos = _makePosition(lat: lat, lng: lng, accuracy: acc);
+        onLocation(pos);
+        _positionCtrl.add(pos);
       });
-    } else {
-      debugPrint(
-        '⚠️ Background service skipped — not supported on this platform',
-      );
     }
-    // 5️⃣ Foreground location timer (updates UI when app is visible)
+
+    // ── 8. Start offline sync retry loop ──────────────────────────────────────
+    OfflineSyncService.startRetryLoop();
+
+    // ── 9. Foreground polling timer ────────────────────────────────────────────
     _locationTimer?.cancel();
-    _locationTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+    _locationTimer = Timer.periodic(_LocationConfig.pollInterval, (_) async {
       try {
         final Position pos = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.high,
+          locationSettings: const LocationSettings(
+            accuracy: _LocationConfig.accuracy,
+          ),
         );
-        onLocation(pos); // Update UI map
 
-        // Foreground SignalR send (background service also sends; both are safe)
-        await signalR.sendLocation(
+        // Accuracy gate (relaxed to 50 m)
+        if (pos.accuracy > _LocationConfig.maxAcceptableAccuracy) {
+          debugPrint(
+            '⚠️ Foreground fix rejected — accuracy '
+                '${pos.accuracy.toStringAsFixed(1)}m > '
+                '${_LocationConfig.maxAcceptableAccuracy}m',
+          );
+          return;
+        }
+
+        // Distance filter
+        if (_lastEmittedPosition != null) {
+          final dist = Geolocator.distanceBetween(
+            _lastEmittedPosition!.latitude,
+            _lastEmittedPosition!.longitude,
+            pos.latitude,
+            pos.longitude,
+          );
+          if (dist < _LocationConfig.minDistanceFilter) {
+            debugPrint(
+              '📍 Skipping duplicate fix — only ${dist.toStringAsFixed(1)}m moved',
+            );
+            return;
+          }
+        }
+
+        _lastEmittedPosition = pos;
+
+        await LocationStorage.appendPoint(RoutePoint(
+          lat: pos.latitude,
+          lng: pos.longitude,
+          timestamp: DateTime.now(),
+        ));
+
+        onLocation(pos);
+        _positionCtrl.add(pos);
+
+        signalR
+            .sendLocation(
           staffId: staffId,
           lat: pos.latitude,
           lng: pos.longitude,
-          shiftId: shiftId,
+          shiftId: AppState.staffTimeTrackerId,
+          userName: userName,
+          tenantIdentifier: tenantIdentifier,
+        )
+            .catchError((e) => debugPrint('⚠️ SignalR send error: $e'));
+
+        await OfflineSyncService.postSafe(
+          'Franchise/api/StaffTimesheet/savestafflocation',
+          {
+            'StaffId': staffId,
+            'Latitude': pos.latitude,
+            'Longitude': pos.longitude,
+            'ShiftId': AppState.staffTimeTrackerId,
+          },
         );
       } catch (e) {
         debugPrint('Foreground location error: $e');
       }
     });
-
-    // 6️⃣ Listen to background position updates → forward to UI callback
-    FlutterBackgroundService().on(kEventLocationUpdate).listen((data) {
-      if (data == null) return;
-      // Background service already sent via SignalR; just keep UI in sync
-      debugPrint('📍 Background update: ${data['lat']}, ${data['lng']}');
-    });
   }
 
   // ── Stop Shift ─────────────────────────────────────────────────────────────
-  static Future<void> stopShift({required String staffId}) async {
-    // 1️⃣ Stop foreground timer + disconnect foreground SignalR
+  static Future<void> stopShift({
+    required String staffId,
+    required String userName,
+  }) async {
     _locationTimer?.cancel();
     _locationTimer = null;
+    _bgEventSub?.cancel();
+    _bgEventSub = null;
+    _lastEmittedPosition = null;
+
     await signalR.disconnect();
     _signalRService = null;
 
-    // 2️⃣ Tell background service to stop (it disconnects its own SignalR)
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       FlutterBackgroundService().invoke(kActionStopTracking);
-      debugPrint('✅ Background service stop requested');
     }
-    // 3️⃣ Call API to end shift
-    final Position pos = await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
+
+    final DateTime? storedStartTime = await LocationStorage.getShiftStartTime();
+    final startPos = await LocationStorage.getShiftStartPosition();
+
+    final Position endPos = await Geolocator.getCurrentPosition(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+      ),
     );
-    final String now = DateTime.now().toIso8601String();
+
+    final DateTime shiftStartTime = storedStartTime ?? DateTime.now();
+    final DateTime shiftEndTime = DateTime.now();
+    final double startLat = startPos?.lat ?? endPos.latitude;
+    final double startLng = startPos?.lng ?? endPos.longitude;
 
     final payload = {
       'Id': AppState.staffTimeTrackerId,
       'StaffId': staffId,
-      'ShiftStartTime': now,
-      'ShiftEndTime': now,
-      'ShiftCreatedDate': now,
-      'ShiftStartLatitude': pos.latitude,
-      'ShiftStartLongitude': pos.longitude,
-      'ShiftEndLatitude': pos.latitude,
-      'ShiftEndLongitude': pos.longitude,
+      'ShiftStartTime': shiftStartTime.toIso8601String(),
+      'ShiftEndTime': shiftEndTime.toIso8601String(),
+      'ShiftCreatedDate': shiftStartTime.toIso8601String(),
+      'ShiftStartLatitude': startLat,
+      'ShiftStartLongitude': startLng,
+      'ShiftEndLatitude': endPos.latitude,
+      'ShiftEndLongitude': endPos.longitude,
       'IsActive': false,
       'IsAcceptTermCondition': true,
       'CreatedBy': staffId,
@@ -175,17 +314,62 @@ class TrackingService {
       payload,
     );
 
-    debugPrint('stopShift → response: $response');
-
     if (response['statusCode'] != 200 && response['statusCode'] != 201) {
       throw Exception(
         'Shift end API failed — statusCode: ${response['statusCode']}',
       );
     }
 
+    OfflineSyncService.stopRetryLoop();
+    final synced = await OfflineSyncService.syncPending();
+    if (synced > 0) {
+      debugPrint('📡 Flushed $synced offline location points on shift end');
+    }
+
+    await LocationStorage.clearPoints();
+    await LocationStorage.clearActiveShift();
+
     AppState.staffTimeTrackerId = '';
-    AppState.currentShiftId = '';
-    debugPrint('✅ Shift ended successfully');
+    debugPrint('✅ Shift ended');
+  }
+
+  // ── Restore shift after app restart ────────────────────────────────────────
+  static Future<({String shiftId, DateTime startTime})?>
+  tryRestoreShift() async {
+    final shiftId = await LocationStorage.getActiveShiftId();
+    final startTime = await LocationStorage.getShiftStartTime();
+    if (shiftId == null || startTime == null) return null;
+
+    AppState.staffTimeTrackerId = shiftId;
+    OfflineSyncService.startRetryLoop();
+
+    debugPrint('🔄 Restored shift: $shiftId started at $startTime');
+    return (shiftId: shiftId, startTime: startTime);
+  }
+
+  // ── High-quality initial fix ───────────────────────────────────────────────
+  static Future<Position> _getBestCurrentPosition() async {
+    Position pos = await Geolocator.getCurrentPosition(
+      locationSettings: _LocationConfig.initialPositionSettings,
+    );
+
+    if (pos.accuracy > 20) {
+      debugPrint(
+        '⚡ Initial fix coarse (${pos.accuracy.toStringAsFixed(1)}m)'
+            ' — waiting for better fix',
+      );
+      await Future.delayed(const Duration(seconds: 3));
+      try {
+        final better = await Geolocator.getCurrentPosition(
+          locationSettings: _LocationConfig.initialPositionSettings,
+        );
+        if (better.accuracy < pos.accuracy) {
+          debugPrint('✅ Better fix: ${better.accuracy.toStringAsFixed(1)}m');
+          return better;
+        }
+      } catch (_) {}
+    }
+    return pos;
   }
 
   // ── Permission helper ──────────────────────────────────────────────────────
@@ -197,5 +381,32 @@ class TrackingService {
     if (perm == LocationPermission.deniedForever) {
       throw Exception('Location permission permanently denied.');
     }
+    if (!kIsWeb && Platform.isIOS && perm == LocationPermission.whileInUse) {
+      debugPrint(
+        '⚠️ iOS: "While In Use" granted. Requesting "Always" for full '
+            'background tracking…',
+      );
+      await Geolocator.requestPermission();
+    }
+  }
+
+  // ── Make a Position from lat/lng ───────────────────────────────────────────
+  static Position _makePosition({
+    required double lat,
+    required double lng,
+    double accuracy = 0,
+  }) {
+    return Position(
+      latitude: lat,
+      longitude: lng,
+      timestamp: DateTime.now(),
+      accuracy: accuracy,
+      altitude: 0,
+      altitudeAccuracy: 0,
+      heading: 0,
+      headingAccuracy: 0,
+      speed: 0,
+      speedAccuracy: 0,
+    );
   }
 }

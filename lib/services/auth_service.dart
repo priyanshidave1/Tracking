@@ -1,4 +1,5 @@
 import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../models/login_request.dart';
@@ -92,7 +93,7 @@ class AuthService {
   Future<String?> getRole() => _storage.read(key: 'user_role');
   Future<String?> getUserName() => _storage.read(key: 'user_name');
   Future<String?> getFullName() => _storage.read(key: 'full_name');
-  Future<String?> getUserEmail() => _storage.read(key: 'user_email'); // ← ADDED
+  Future<String?> getUserEmail() => _storage.read(key: 'user_email');
   Future<String?> getTenant() => _storage.read(key: 'tenant_id');
 
   Future<bool> isLoggedIn() async {
@@ -100,7 +101,18 @@ class AuthService {
     return token != null && token.isNotEmpty;
   }
 
-  // Use for every authenticated API call
+  // ── SESSION HELPERS ────────────────────────────────────────────────────────
+
+  /// Deletes only the JWT bearer token, leaving non-sensitive values
+  /// (user_id, user_email, tenant_id, user_name) intact.
+  ///
+  /// Called by [SessionService] when the session has expired but we want
+  /// the login form to pre-fill the tenant field for convenience.
+  Future<void> clearTokenOnly() async {
+    await _storage.delete(key: 'auth_token');
+  }
+
+  // ── Use for every authenticated API call ───────────────────────────────────
   Future<Map<String, String>> authHeaders() async {
     final token = await getToken();
     final tenant = await getTenant();

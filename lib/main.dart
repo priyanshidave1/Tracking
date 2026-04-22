@@ -1,71 +1,99 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
+import 'package:my_app/screens/SplashScreen.dart';
+import 'package:my_app/services/sessionservice.dart';
 import 'package:provider/provider.dart';
-import 'providers/auth_provider.dart';
-import 'screens/login_screen.dart';
-import 'screens/home_screen.dart';
 
-void main() {
-  HttpOverrides.global = _DevHttpOverrides();
+import 'providers/auth_provider.dart';
+import 'services/background_location_service.dart';
+import '../utils/app_theme.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialise the background location service (Android foreground service
+  // + iOS background mode configuration).
+  await initBackgroundService();
+
   runApp(
-    ChangeNotifierProvider(create: (_) => AuthProvider(), child: const MyApp()),
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => AuthProvider()),
+      ],
+      // LifecycleWatcher sits above MaterialApp so it receives lifecycle
+      // events for the entire app lifetime, including while navigating
+      // between screens.
+      child: const _LifecycleWatcher(
+        child: MyApp(),
+      ),
+    ),
   );
 }
 
-class _DevHttpOverrides extends HttpOverrides {
-  @override
-  HttpClient createHttpClient(SecurityContext? context) {
-    return super.createHttpClient(context)
-      ..badCertificateCallback =
-          (X509Certificate cert, String host, int port) => true;
-  }
-}
+// ── Root app widget ───────────────────────────────────────────────────────────
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  const MyApp();
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'AP Cabinet',
+      title: 'AP Cabinet Staff',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(colorSchemeSeed: Colors.blue, useMaterial3: true),
-      home: const _StartupRouter(),
+      theme: AppTheme.lightTheme,
+      // SplashScreen is the entry point on every cold start.
+      // It reads session state and immediately replaces itself with either
+      // HomeScreen or LoginScreen — the user never lingers here.
+      home: const SplashScreen(),
     );
   }
 }
 
-class _StartupRouter extends StatefulWidget {
-  const _StartupRouter();
+// ── Lifecycle watcher ─────────────────────────────────────────────────────────
+//
+// A thin StatefulWidget that wraps the entire widget tree and observes
+// AppLifecycleState changes.  When the app is paused (goes to background
+// or is killed by the OS), it records the current timestamp via
+// SessionService so that SplashScreen can later compute how long the
+// app was away.
+
+class _LifecycleWatcher extends StatefulWidget {
+  final Widget child;
+
+  const _LifecycleWatcher({required this.child});
 
   @override
-  State<_StartupRouter> createState() => _StartupRouterState();
+  State<_LifecycleWatcher> createState() => _LifecycleWatcherState();
 }
 
-class _StartupRouterState extends State<_StartupRouter> {
-  bool _checking = true;
+class _LifecycleWatcherState extends State<_LifecycleWatcher>
+    with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    _checkAuth();
-  }
-
-  Future<void> _checkAuth() async {
-    await context.read<AuthProvider>().checkLoginStatus();
-    setState(() => _checking = false);
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
-  Widget build(BuildContext context) {
-    if (_checking) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
-    }
-    final auth = context.watch<AuthProvider>();
-    if (auth.isLoggedIn) {
-      return HomeScreen(staffId: auth.userId!);
-    } else {
-      return const LoginScreen();
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // [paused]   → app sent to background (home button, task switcher, or
+    //               about to be killed).  Write the timestamp NOW so that
+    //               even if the process is killed immediately after, the
+    //               timestamp is already persisted.
+    // [resumed]  → no action needed; SplashScreen handles restore on cold
+    //               start, and hot-resume is handled by the individual
+    //               screen's own didChangeAppLifecycleState observers.
+    if (state == AppLifecycleState.paused) {
+      SessionService.onAppPaused();
+      debugPrint('📱 App paused — background timestamp recorded');
     }
   }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }

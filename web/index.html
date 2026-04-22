@@ -31,6 +31,8 @@
 
   <title>my_app</title>
   <link rel="manifest" href="manifest.json">
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyB52Nlo6Zy4sXw8CQNDgUaha0hEjh3vPAI"></script>
+
 </head>
 <body>
   <!--
@@ -42,5 +44,17 @@
     * https://docs.flutter.dev/platform-integration/web/initialization
   -->
   <script src="flutter_bootstrap.js" async></script>
+
+  <script>
+    window.addEventListener('load', function () {
+      // Ensure google.maps is available before Flutter paints anything
+      if (typeof google === 'undefined' || typeof google.maps === 'undefined') {
+        console.error('Google Maps JS API failed to load.');
+        return;
+      }
+      _flutter.loader.load();  // or your existing bootstrap call
+    });
+  </script>
+
 </body>
 </html>

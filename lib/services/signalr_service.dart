@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:signalr_netcore/signalr_client.dart';
 import '../config/app_config.dart';
+import 'api_service.dart';
 
 class _DevHttpOverrides extends HttpOverrides {
   @override
@@ -16,32 +17,44 @@ class SignalRService {
   HubConnection? _hubConnection;
   bool _isConnected = false;
   String? _currentStaffId;
+  String? _token; // ← stored so reconnect can reuse it
 
   bool get isConnected => _isConnected;
   String? get currentStaffId => _currentStaffId;
 
-  Future<void> connect(String staffId) async {
+  // ── Connect ──────────────────────────────────────────────────────────────
+  /// [token] is the JWT bearer token stored in FlutterSecureStorage.
+  /// Without it the server's Context.User is null and SendLocation is a no-op.
+  Future<void> connect(String staffId, {String? token}) async {
     // Already connected for the same staff → skip
     if (_isConnected && _currentStaffId == staffId) {
       debugPrint('SignalR already connected for $staffId');
       return;
     }
 
-    // Different staff connected → disconnect first
+    // Different staff → disconnect first
     if (_isConnected) await disconnect();
 
     HttpOverrides.global = _DevHttpOverrides();
+    _token = token;
 
     final options = HttpConnectionOptions(
       transport: HttpTransportType.WebSockets,
       skipNegotiation: false,
       logMessageContent: kDebugMode,
+      // ── KEY FIX: pass JWT so server can read Context.User ──────────────
+      accessTokenFactory: (_token != null && _token!.isNotEmpty)
+          ? () async => _token!
+          : null,
     );
 
     _hubConnection = HubConnectionBuilder()
         .withUrl(AppConfig.hubUrl, options: options)
         .withAutomaticReconnect(retryDelays: [2000, 5000, 10000, 30000])
         .build();
+
+    _hubConnection!.serverTimeoutInMilliseconds = 30000;
+    _hubConnection!.keepAliveIntervalInMilliseconds = 15000;
 
     _hubConnection!.onreconnecting(({error}) {
       debugPrint('⚡ SignalR reconnecting... $error');
@@ -70,41 +83,59 @@ class SignalRService {
     }
   }
 
-  /// Ensures connection is alive; reconnects if not.
+  // ── Ensure connected ─────────────────────────────────────────────────────
+  /// Reconnects if not already connected, reusing the stored token.
   Future<void> ensureConnected(String staffId) async {
     if (_hubConnection?.state == HubConnectionState.Connected) return;
     debugPrint('SignalR not connected — attempting reconnect for $staffId');
-    await connect(staffId);
+    await connect(staffId, token: _token);
   }
 
+  // ── Send location ────────────────────────────────────────────────────────
   Future<void> sendLocation({
     required String staffId,
     required double lat,
     required double lng,
     required String shiftId,
+    required String userName,
+    required String tenantIdentifier
   }) async {
-    // Try to restore connection if lost (handles background resume)
-    if (_hubConnection?.state != HubConnectionState.Connected) {
+    if (_hubConnection == null) {
+      debugPrint('❌ HubConnection is NULL — skipping sendLocation');
+      return;
+    }
+
+    if (_hubConnection!.state != HubConnectionState.Connected) {
+      debugPrint('⚠️ Not connected → reconnecting before send...');
       await ensureConnected(staffId);
     }
 
-    if (_hubConnection?.state == HubConnectionState.Connected) {
+    if (_hubConnection!.state == HubConnectionState.Connected) {
       try {
-        await _hubConnection!.invoke('SendLocation', args: [shiftId, lat, lng]);
-        debugPrint('📍 Location sent: ($lat, $lng)');
+        // Server signature: SendLocation(double latitude, double longitude, string? shiftId)
+        await _hubConnection!.invoke('SendLocationFromFlutter', args: [lat, lng, shiftId,staffId,userName, ApiConfig.connectionString]);
+
+        _hubConnection!.on('LocationSaved', (args) {
+          debugPrint("✅ location saved confirmed");
+        });
+
+        debugPrint(
+            '📡 Location sent → ($lat, $lng) shift=$shiftId , staffId = $staffId , userName = $userName, tenantIdentifier = $tenantIdentifier');
       } catch (e) {
         debugPrint('❌ sendLocation failed: $e');
       }
     } else {
-      debugPrint('⚠️ SignalR unavailable — location not sent');
+      debugPrint('❌ Still not connected after reconnect attempt');
     }
   }
 
+  // ── Disconnect ───────────────────────────────────────────────────────────
   Future<void> disconnect() async {
     await _hubConnection?.stop();
     _hubConnection = null;
     _isConnected = false;
     _currentStaffId = null;
+    _token = null;
     debugPrint('🔌 SignalR disconnected');
   }
 }
