@@ -21,14 +21,14 @@ class AppState {
 // ── Location Accuracy Config ──────────────────────────────────────────────────
 class _LocationConfig {
   static const LocationAccuracy accuracy = LocationAccuracy.bestForNavigation;
-  static const Duration pollInterval = Duration(seconds: 5);
+  static const Duration pollInterval = Duration(seconds: 3);
 
   // FIX: Raised from 25 m → 50 m.
   //
   // 25 m was rejecting valid GPS fixes near buildings and at intersections
   // (exactly where turns happen).  50 m still filters obviously bad locks
   // while preserving the turn points that make the route look correct.
-  static const double maxAcceptableAccuracy = 50.0;
+  static const double maxAcceptableAccuracy = 25.0;
 
   static const double minDistanceFilter = 5.0;
   static const LocationSettings initialPositionSettings = LocationSettings(
@@ -189,23 +189,43 @@ class TrackingService {
     _locationTimer?.cancel();
     _locationTimer = Timer.periodic(_LocationConfig.pollInterval, (_) async {
       try {
-        final Position pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: _LocationConfig.accuracy,
-          ),
-        );
-
-        // Accuracy gate (relaxed to 50 m)
-        if (pos.accuracy > _LocationConfig.maxAcceptableAccuracy) {
-          debugPrint(
-            '⚠️ Foreground fix rejected — accuracy '
-                '${pos.accuracy.toStringAsFixed(1)}m > '
-                '${_LocationConfig.maxAcceptableAccuracy}m',
+        // ── Retry up to 3 times to get an accurate fix ──────────────────
+        Position? pos;
+        for (int attempt = 0; attempt < 3; attempt++) {
+          final candidate = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.bestForNavigation,
+            ),
           );
-          return;
+
+          if (candidate.accuracy <= _LocationConfig.maxAcceptableAccuracy) {
+            pos = candidate;
+            break; // good fix — stop retrying
+          }
+
+          debugPrint(
+            '⚠️ Attempt ${attempt + 1}: poor fix '
+                '${candidate.accuracy.toStringAsFixed(1)}m — retrying…',
+          );
+
+          // Keep the best fix we have even if not ideal
+          if (pos == null || candidate.accuracy < pos.accuracy) {
+            pos = candidate;
+          }
+
+          await Future.delayed(const Duration(milliseconds: 800));
         }
 
-        // Distance filter
+        if (pos == null) return;
+
+        // Log accuracy for debugging
+        debugPrint(
+          '📍 Foreground fix: ${pos.latitude.toStringAsFixed(6)}, '
+              '${pos.longitude.toStringAsFixed(6)} '
+              '± ${pos.accuracy.toStringAsFixed(1)}m',
+        );
+
+        // ── Distance filter ────────────────────────────────────────────
         if (_lastEmittedPosition != null) {
           final dist = Geolocator.distanceBetween(
             _lastEmittedPosition!.latitude,
@@ -215,7 +235,7 @@ class TrackingService {
           );
           if (dist < _LocationConfig.minDistanceFilter) {
             debugPrint(
-              '📍 Skipping duplicate fix — only ${dist.toStringAsFixed(1)}m moved',
+              '📍 Skipping — only ${dist.toStringAsFixed(1)}m moved',
             );
             return;
           }
@@ -250,6 +270,7 @@ class TrackingService {
             'Latitude': pos.latitude,
             'Longitude': pos.longitude,
             'ShiftId': AppState.staffTimeTrackerId,
+            'Accuracy': pos.accuracy, // ← ADD: store accuracy in DB for analysis
           },
         );
       } catch (e) {

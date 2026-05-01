@@ -40,6 +40,24 @@ class AuthProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Called by SplashScreen after a successful PIN-unlock silent re-login.
+  /// Re-reads what AuthService just wrote to SecureStorage so the rest of
+  /// the app has fresh state without going through the login form.
+  Future<void> refreshFromStoredData() async {
+    final id = await _service.getUserId();
+
+    _userId    = id;
+    staffId    = id;                              // public field — no underscore
+    _userName  = await _service.getUserName();
+    _fullName  = await _service.getFullName();
+    _userEmail = await _service.getUserEmail();
+    _role      = await _service.getRole();
+    _isLoggedIn = true;
+    // No _token field in this provider — token lives in SecureStorage only.
+
+    notifyListeners();
+  }
+
   Future<LoginApiResponse> login(LoginRequest request) async {
     _setLoading(true);
     final response = await _service.login(request);
@@ -73,6 +91,7 @@ class AuthProvider extends ChangeNotifier {
     await _service.logout();
     _isLoggedIn = false;
     _userId = null;
+    staffId = null;
     _tenantIdentifier = null;
     _role = null;
     _userName = null;

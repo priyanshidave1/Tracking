@@ -1,99 +1,95 @@
 import 'package:flutter/material.dart';
-import 'package:my_app/screens/SplashScreen.dart';
-import 'package:my_app/services/sessionservice.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:provider/provider.dart';
 
-import 'providers/auth_provider.dart';
-import 'services/background_location_service.dart';
-import '../utils/app_theme.dart';
+import 'package:my_app/services/background_location_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-Future<void> main() async {
+import 'providers/auth_provider.dart';
+import 'screens/SplashScreen.dart';
+import 'utils/app_theme.dart';
+
+final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      navigatorKey: navigatorKey,
+      title: 'My App',
+      theme: AppTheme.lightTheme, // or however you use AppTheme
+      home: const SplashScreen(),
+    );
+  }
+}
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Initialise the background location service (Android foreground service
-  // + iOS background mode configuration).
-  await initBackgroundService();
+  // Lock to portrait only
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
 
+  // Status bar styling
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.dark,
+    ),
+  );
+  await _clearStaleDataOnFreshInstall();
+  // ✅ Show app FIRST — Login visible immediately on Vivo!
   runApp(
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => AuthProvider()),
       ],
-      // LifecycleWatcher sits above MaterialApp so it receives lifecycle
-      // events for the entire app lifetime, including while navigating
-      // between screens.
-      child: const _LifecycleWatcher(
-        child: MyApp(),
-      ),
+      child: const MyApp(),
     ),
   );
+
+  // ✅ Init background service AFTER UI is shown
+  _initServicesInBackground();
 }
 
-// ── Root app widget ───────────────────────────────────────────────────────────
-
-class MyApp extends StatelessWidget {
-  const MyApp();
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'AP Cabinet Staff',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.lightTheme,
-      // SplashScreen is the entry point on every cold start.
-      // It reads session state and immediately replaces itself with either
-      // HomeScreen or LoginScreen — the user never lingers here.
-      home: const SplashScreen(),
-    );
+Future<void> _clearStaleDataOnFreshInstall() async {
+  final prefs = await SharedPreferences.getInstance();
+  final alreadyInitialized = prefs.getBool('_app_initialized') ?? false;
+  if (!alreadyInitialized) {
+    final storage = FlutterSecureStorage(); // ← 'final' not 'const'
+    await storage.deleteAll();
+    await prefs.setBool('_app_initialized', true);
+    debugPrint('🧹 Fresh install detected — cleared stale secure storage');
   }
 }
 
-// ── Lifecycle watcher ─────────────────────────────────────────────────────────
-//
-// A thin StatefulWidget that wraps the entire widget tree and observes
-// AppLifecycleState changes.  When the app is paused (goes to background
-// or is killed by the OS), it records the current timestamp via
-// SessionService so that SplashScreen can later compute how long the
-// app was away.
+// ✅ All heavy init runs here — won't block Login page
+Future<void> _initServicesInBackground() async {
+  // Small delay to let UI fully render first
+  await Future.delayed(const Duration(milliseconds: 500));
 
-class _LifecycleWatcher extends StatefulWidget {
-  final Widget child;
-
-  const _LifecycleWatcher({required this.child});
-
-  @override
-  State<_LifecycleWatcher> createState() => _LifecycleWatcherState();
-}
-
-class _LifecycleWatcherState extends State<_LifecycleWatcher>
-    with WidgetsBindingObserver {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    // [paused]   → app sent to background (home button, task switcher, or
-    //               about to be killed).  Write the timestamp NOW so that
-    //               even if the process is killed immediately after, the
-    //               timestamp is already persisted.
-    // [resumed]  → no action needed; SplashScreen handles restore on cold
-    //               start, and hot-resume is handled by the individual
-    //               screen's own didChangeAppLifecycleState observers.
-    if (state == AppLifecycleState.paused) {
-      SessionService.onAppPaused();
-      debugPrint('📱 App paused — background timestamp recorded');
+  if (!_isWeb()) {
+    try {
+      await initBackgroundService().timeout(
+        const Duration(seconds: 10), // ✅ Timeout — won't hang forever
+        onTimeout: () {
+          debugPrint('⚠️ Background service init timed out (Vivo/aggressive OS)');
+        },
+      );
+    } catch (e) {
+      debugPrint('⚠️ Background service init failed: $e');
+      // ✅ App still works — just without background service
     }
   }
+}
 
-  @override
-  Widget build(BuildContext context) => widget.child;
+bool _isWeb() {
+  try {
+    return identical(0, 0.0);
+  } catch (_) {
+    return false;
+  }
 }

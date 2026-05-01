@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'dart:ui';
 
 import 'package:flutter/widgets.dart';
@@ -12,11 +13,13 @@ import 'signalr_service.dart';
 
 // ── Action / event channel names ──────────────────────────────────────────────
 const kActionStartTracking = 'startTracking';
-const kActionStopTracking = 'stopTracking';
+const kActionStopTracking  = 'stopTracking';
 const kEventLocationUpdate = 'locationUpdate';
 
 // ── Service initialisation (called once from main.dart) ───────────────────────
 Future<void> initBackgroundService() async {
+  if (kIsWeb) return;
+
   final service = FlutterBackgroundService();
 
   const AndroidNotificationChannel channel = AndroidNotificationChannel(
@@ -29,8 +32,8 @@ Future<void> initBackgroundService() async {
   final FlutterLocalNotificationsPlugin notifications =
   FlutterLocalNotificationsPlugin();
   final androidImpl = notifications
-      .resolvePlatformSpecificImplementation<
-      AndroidFlutterLocalNotificationsPlugin>();
+      .resolvePlatformSpecificImplementation
+  <AndroidFlutterLocalNotificationsPlugin>();
   await androidImpl?.createNotificationChannel(channel);
 
   await service.configure(
@@ -51,7 +54,7 @@ Future<void> initBackgroundService() async {
   );
 }
 
-// ── iOS background handler ─────────────────────────────────────────────────────
+// ── iOS background handler ────────────────────────────────────────────────────
 @pragma('vm:entry-point')
 Future<bool> _onIosBackground(ServiceInstance service) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,7 +62,7 @@ Future<bool> _onIosBackground(ServiceInstance service) async {
   return true;
 }
 
-// ── Main background entry point ────────────────────────────────────────────────
+// ── Main background entry point ───────────────────────────────────────────────
 @pragma('vm:entry-point')
 Future<void> _onBackgroundStart(ServiceInstance service) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,17 +73,12 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
 
   String? currentStaffId;
   String? currentShiftId;
-  String currentUserName = '';
+  String  currentUserName         = '';
   String? currentTenantIdentifier;
 
-  // FIX: Raised default accuracy threshold from 25 m → 50 m.
-  //
-  // A 25 m gate rejects GPS fixes near buildings and at intersections where
-  // turns happen, creating gaps in the stored route that appear as straight
-  // lines when the app is restored.  50 m retains the important turn points
-  // while still discarding obviously bad satellite locks (>50 m).
-  double minDistanceFilter = 8.0;
-  double maxAccuracyMeters = 50.0;
+  // Defaults — overwritten by the startTracking payload from tracking_service
+  double minDistanceFilter = 5.0;  // metres
+  double maxAccuracyMeters = 25.0; // metres
 
   ({double lat, double lng})? _lastPosition;
 
@@ -88,17 +86,17 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
   service.on(kActionStartTracking).listen((data) async {
     if (data == null) return;
 
-    currentStaffId = data['staffId'] as String?;
-    currentShiftId = data['shiftId'] as String?;
-    currentUserName = (data['userName'] as String?) ?? '';
-    currentTenantIdentifier = data['tenantIdentifier'] as String?;
-    final String? token = data['token'] as String?;
+    currentStaffId          = data['staffId']           as String?;
+    currentShiftId          = data['shiftId']            as String?;
+    currentUserName         = (data['userName']          as String?) ?? '';
+    currentTenantIdentifier = data['tenantIdentifier']   as String?;
+    final String? token     = data['token']              as String?;
 
-    // Honour caller-supplied thresholds but keep 50 m as minimum for accuracy
+    // Honour exact thresholds passed from tracking_service — no floor applied
     minDistanceFilter =
-        (data['minDistanceFilter'] as num?)?.toDouble() ?? 8.0;
+        (data['minDistanceFilter'] as num?)?.toDouble() ?? 5.0;
     maxAccuracyMeters =
-        max((data['maxAccuracy'] as num?)?.toDouble() ?? 50.0, 50.0);
+        (data['maxAccuracy']       as num?)?.toDouble() ?? 25.0;
 
     if (currentStaffId == null || currentShiftId == null) {
       debugPrint('⚠️ BG: missing staffId or shiftId — aborting');
@@ -110,16 +108,19 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
     }
 
     debugPrint(
-      '🔧 BG: starting tracking  staffId=$currentStaffId'
-          '  shiftId=$currentShiftId  userName=$currentUserName'
+      '🔧 BG: starting tracking'
+          '  staffId=$currentStaffId'
+          '  shiftId=$currentShiftId'
+          '  userName=$currentUserName'
           '  tenant=$currentTenantIdentifier'
-          '  maxAccuracy=${maxAccuracyMeters}m',
+          '  maxAccuracy=${maxAccuracyMeters}m'
+          '  minDist=${minDistanceFilter}m',
     );
 
     if (service is AndroidServiceInstance) {
       service.setForegroundNotificationInfo(
         title: 'Shift Active',
-        content: 'Sending live location every 5 s…',
+        content: 'Sending live location every 3 s…',
       );
     }
 
@@ -132,26 +133,39 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
 
     locationTimer?.cancel();
 
-    // ── GPS polling loop (every 5 seconds) ────────────────────────────────
-    locationTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+    // ── GPS polling loop (every 3 seconds) ───────────────────────────────
+    locationTimer = Timer.periodic(const Duration(seconds: 3), (_) async {
       try {
-        final pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 10),
-          ),
-        );
-
-        // ── Accuracy gate ────────────────────────────────────────────────
-        if (pos.accuracy > maxAccuracyMeters) {
-          debugPrint(
-            '⚠️ BG: rejected fix — ${pos.accuracy.toStringAsFixed(1)}m'
-                ' > ${maxAccuracyMeters}m',
+        // Retry up to 3 times to get a fix within the accuracy threshold
+        Position? pos;
+        for (int attempt = 0; attempt < 3; attempt++) {
+          final candidate = await Geolocator.getCurrentPosition(
+            locationSettings: const LocationSettings(
+              accuracy: LocationAccuracy.bestForNavigation,
+              timeLimit: Duration(seconds: 8),
+            ),
           );
-          return;
+
+          if (candidate.accuracy <= maxAccuracyMeters) {
+            pos = candidate;
+            break; // good fix — stop retrying
+          }
+
+          // Keep the best fix seen so far even if still not ideal
+          if (pos == null || candidate.accuracy < pos.accuracy) {
+            pos = candidate;
+          }
+
+          debugPrint(
+            '⚠️ BG attempt ${attempt + 1}: '
+                '${candidate.accuracy.toStringAsFixed(1)}m — retrying…',
+          );
+          await Future.delayed(const Duration(milliseconds: 600));
         }
 
-        // ── Distance filter ──────────────────────────────────────────────
+        if (pos == null) return;
+
+        // ── Distance filter ────────────────────────────────────────────
         if (_lastPosition != null) {
           final dist = Geolocator.distanceBetween(
             _lastPosition!.lat,
@@ -161,8 +175,8 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
           );
           if (dist < minDistanceFilter) {
             debugPrint(
-              '📍 BG: skip — ${dist.toStringAsFixed(1)}m < '
-                  '${minDistanceFilter}m filter',
+              '📍 BG skip — ${dist.toStringAsFixed(1)}m '
+                  '< ${minDistanceFilter}m filter',
             );
             return;
           }
@@ -180,36 +194,37 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
         if (currentTenantIdentifier != null) {
           signalR
               .sendLocation(
-            staffId: currentStaffId!,
-            lat: pos.latitude,
-            lng: pos.longitude,
-            shiftId: currentShiftId!,
-            userName: currentUserName,
-            tenantIdentifier: currentTenantIdentifier!,
+            staffId:            currentStaffId!,
+            lat:                pos.latitude,
+            lng:                pos.longitude,
+            shiftId:            currentShiftId!,
+            userName:           currentUserName,
+            tenantIdentifier:   currentTenantIdentifier!,
           )
-              .catchError((e) => debugPrint('⚠️ BG SignalR sendLocation: $e'));
+              .catchError((e) => debugPrint('⚠️ BG SignalR send: $e'));
         }
 
-        // 3️⃣  Offline-safe REST call
+        // 3️⃣  Single offline-safe REST call — includes Accuracy
         await OfflineSyncService.postSafe(
           'Franchise/api/StaffTimesheet/savestafflocation',
           {
-            'StaffId': currentStaffId!,
-            'Latitude': pos.latitude,
+            'StaffId':   currentStaffId!,
+            'Latitude':  pos.latitude,
             'Longitude': pos.longitude,
-            'ShiftId': currentShiftId!,
+            'ShiftId':   currentShiftId!,
+            'Accuracy':  pos.accuracy,
           },
         );
 
         // 4️⃣  Forward event to foreground UI
         service.invoke(kEventLocationUpdate, {
-          'lat': pos.latitude,
-          'lng': pos.longitude,
-          'accuracy': pos.accuracy,
+          'lat':       pos.latitude,
+          'lng':       pos.longitude,
+          'accuracy':  pos.accuracy,
           'timestamp': DateTime.now().toIso8601String(),
         });
 
-        // 5️⃣  Update notification
+        // 5️⃣  Update notification text only — no extra REST call here
         if (service is AndroidServiceInstance) {
           service.setForegroundNotificationInfo(
             title: 'Shift Active',
@@ -240,6 +255,3 @@ Future<void> _onBackgroundStart(ServiceInstance service) async {
     debugPrint('✅ BG service stopped');
   });
 }
-
-// ignore: non_constant_identifier_names
-double max(double a, double b) => a > b ? a : b;

@@ -5,6 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:my_app/screens/location_storage.dart';
+import 'package:my_app/screens/SettingsScreen.dart';
+import 'package:my_app/screens/staff_location_map_screen.dart';
+import 'package:my_app/services/api_service.dart';
 import 'package:my_app/services/tracking_service.dart';
 import 'package:provider/provider.dart';
 
@@ -17,7 +20,13 @@ class HomeScreen extends StatefulWidget {
   final String staffId;
   final String userName;
   final String tenantIdentifier;
-  const HomeScreen({super.key, required this.staffId, required this.userName, required this.tenantIdentifier});
+
+  const HomeScreen({
+    super.key,
+    required this.staffId,
+    required this.userName,
+    required this.tenantIdentifier,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -31,15 +40,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   String _elapsedLabel = '00:00:00';
   Timer? _timer;
   Duration _totalToday = Duration.zero;
+  bool _shiftStarting = false;
 
   // ── Animations ─────────────────────────────────────────────────────────────
   late AnimationController _pulseCtrl;
   late AnimationController _fadeCtrl;
   late Animation<double> _fadeAnim;
 
-  // ── Filter ─────────────────────────────────────────────────────────────────
-  final _dateCtrl = TextEditingController();
-  List<ShiftGroup> _displayed = groupShifts(kDummyShifts);
+  // ── Timesheet ──────────────────────────────────────────────────────────────
+  List<ShiftGroup> _displayed = [];
+  bool _shiftsLoading = false;
 
   @override
   void initState() {
@@ -59,10 +69,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _fadeAnim = CurvedAnimation(parent: _fadeCtrl, curve: Curves.easeOut);
     _fadeCtrl.forward();
 
-    _calcTotalToday();
-
-    // Restore shift if app was killed while a shift was active
     _tryRestoreShift();
+    _fetchShifts();
   }
 
   @override
@@ -70,13 +78,49 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     _timer?.cancel();
     _pulseCtrl.dispose();
     _fadeCtrl.dispose();
-    _dateCtrl.dispose();
     super.dispose();
   }
 
-  // ── Restore ────────────────────────────────────────────────────────────────
+  // ── Fetch shifts ───────────────────────────────────────────────────────────
+  Future<void> _fetchShifts({DateTime? filterDate}) async {
+    setState(() => _shiftsLoading = true);
+    try {
+      final models = await ApiService.getStaffShifts(
+        staffId: widget.staffId,
+        targetDate: filterDate,
+      );
+
+      final entries = models.map((m) => m.toShiftEntry()).toList();
+
+      final todayStr =
+          '${DateTime.now().day.toString().padLeft(2, '0')}/'
+          '${DateTime.now().month.toString().padLeft(2, '0')}/'
+          '${DateTime.now().year}';
+
+      int minutes = 0;
+      for (final e in entries.where((s) => s.date == todayStr)) {
+        final p = e.totalHours.split(':');
+        minutes += int.parse(p[0]) * 60 + int.parse(p[1]);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _displayed = groupShifts(entries);
+        _totalToday = Duration(minutes: minutes);
+      });
+    } catch (e) {
+      if (mounted) {
+        AppToast.show(context, 'Failed to load shifts: $e', isError: true);
+      }
+    } finally {
+      if (mounted) setState(() => _shiftsLoading = false);
+    }
+  }
+
+  // ── Restore active shift ───────────────────────────────────────────────────
   Future<void> _tryRestoreShift() async {
     final restored = await TrackingService.tryRestoreShift();
+
     if (restored == null || !mounted) return;
 
     setState(() {
@@ -84,7 +128,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       _shiftStart = restored.startTime;
     });
 
-    // Re-attach the elapsed ticker
     _timer?.cancel();
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted || _shiftStart == null) return;
@@ -92,21 +135,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         _elapsedLabel = _fmtDuration(DateTime.now().difference(_shiftStart!));
       });
     });
-
-    debugPrint('🔄 HomeScreen: shift restored — ${restored.shiftId}');
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────────
-  void _calcTotalToday() {
-    int minutes = 0;
-    final today = kDummyShifts.where((s) => s.date == '06/04/2026').toList();
-    for (final s in today) {
-      final parts = s.totalHours.split(':');
-      minutes += int.parse(parts[0]) * 60 + int.parse(parts[1]);
-    }
-    _totalToday = Duration(minutes: minutes);
-  }
-
   String _fmtDuration(Duration d) {
     final h = d.inHours.toString().padLeft(2, '0');
     final m = (d.inMinutes % 60).toString().padLeft(2, '0');
@@ -116,29 +147,28 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   void _onNewPosition(Position pos) {
     if (!mounted) return;
-    // Position is forwarded to _LiveMapCard via TrackingService.positionStream.
-    // Nothing extra needed here beyond keeping the UI repaint cycle going.
     setState(() {});
   }
 
   // ── Shift start ────────────────────────────────────────────────────────────
   Future<void> _startShift() async {
+    if (_shiftStarting) return;
     if (!_termsAccepted) {
       AppToast.show(context, 'Please accept terms & conditions first.',
           isError: true);
       return;
     }
+    setState(() => _shiftStarting = true);
     try {
-      debugPrint('HomeScreen: before startShift → ${widget.tenantIdentifier}');
-
       await TrackingService.startShift(
         staffId: widget.staffId,
         userName: widget.userName,
-        tenantIdentifier : widget.tenantIdentifier,
+        tenantIdentifier: widget.tenantIdentifier,
         onLocation: _onNewPosition,
       );
 
       _shiftStart = DateTime.now();
+
       _timer = Timer.periodic(const Duration(seconds: 1), (_) {
         if (!mounted || _shiftStart == null) return;
         setState(() {
@@ -153,17 +183,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             isSuccess: true);
       }
     } catch (e) {
-      debugPrint('HomeScreen: Failed to start shift → $e');
       if (mounted) {
         AppToast.show(context, 'Failed to start shift: $e', isError: true);
       }
+    }finally {
+      if (mounted) setState(() => _shiftStarting = false); // ← always re-enable
     }
   }
 
   // ── Shift stop ─────────────────────────────────────────────────────────────
   Future<void> _stopShift() async {
     try {
-      await TrackingService.stopShift(staffId: widget.staffId , userName:widget.userName);
+      await TrackingService.stopShift(
+          staffId: widget.staffId, userName: widget.userName);
 
       _timer?.cancel();
       _timer = null;
@@ -179,6 +211,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         _shiftStart = null;
       });
 
+      await _fetchShifts();
+
       if (mounted) {
         AppToast.show(
           context,
@@ -187,32 +221,17 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
       }
     } catch (e) {
-      debugPrint('HomeScreen: Failed to stop shift → $e');
       if (mounted) {
         AppToast.show(context, 'Failed to stop shift: $e', isError: true);
       }
     }
   }
 
-  void _searchByDate() {
-    final q = _dateCtrl.text.trim();
-    if (q.isEmpty) return;
-    setState(() {
-      _displayed = groupShifts(
-        kDummyShifts.where((s) => s.date.contains(q)).toList(),
-      );
-    });
-  }
-
-  void _resetSearch() {
-    _dateCtrl.clear();
-    setState(() => _displayed = groupShifts(kDummyShifts));
-  }
-
+  // ── Logout ─────────────────────────────────────────────────────────────────
   Future<void> _handleLogout() async {
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => _LogoutDialog(),
+      builder: (_) => const _LogoutDialog(),
     );
     if (ok != true || !mounted) return;
     await context.read<AuthProvider>().logout();
@@ -252,21 +271,20 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               totalLabel: totalLabel,
               termsAccepted: _termsAccepted,
               shiftActive: _shiftActive,
+              shiftStarting: _shiftStarting,
               elapsedLabel: _elapsedLabel,
               onTermsChanged: (v) =>
                   setState(() => _termsAccepted = v ?? false),
               onShiftStart: _startShift,
               onShiftStop: _stopShift,
-              onMenuTap: () => Scaffold.of(context).openDrawer(),
               onAvatarTap: _handleLogout,
             ),
             Expanded(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.fromLTRB(20, 20, 20, 32),
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // ── Live map (shown only when shift is active) ──────────
                     AnimatedSwitcher(
                       duration: const Duration(milliseconds: 500),
                       child: _shiftActive
@@ -275,17 +293,21 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                         pulseCtrl: _pulseCtrl,
                         elapsed: _elapsedLabel,
                       )
-                          : const SizedBox.shrink(
-                        key: ValueKey('no_map'),
+                          : _IdleBanner(
+                        key: const ValueKey('idle_banner'),
                       ),
                     ),
-                    if (_shiftActive) const SizedBox(height: 20),
-                    _TimesheetSection(
-                      dateCtrl: _dateCtrl,
-                      displayed: _displayed,
-                      onSearch: _searchByDate,
-                      onReset: _resetSearch,
-                    ),
+                    const SizedBox(height: 16),
+                    if (_shiftsLoading)
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 60),
+                        child: Center(child: CircularProgressIndicator()),
+                      )
+                    else
+                      _TimesheetSection(
+                        displayed: _displayed,
+                        staffId: widget.staffId,
+                      ),
                   ],
                 ),
               ),
@@ -311,18 +333,72 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   }
 }
 
-// ── Live Map Card ─────────────────────────────────────────────────────────────
+// ── Idle Banner (no countdown — just a ready state) ───────────────────────────
+class _IdleBanner extends StatelessWidget {
+  const _IdleBanner({super.key});
 
-/// Shows a real Google Map with:
-/// - A green marker at the shift-start location
-/// - A blue marker at the current (latest) location
-/// - A blue polyline tracing the full travelled path
-///
-/// On first mount it loads the stored route from [LocationStorage] so that the
-/// path is visible immediately, even if the app was minimised during tracking.
-///
-/// While mounted it subscribes to [TrackingService.positionStream] to receive
-/// live updates pushed by both the foreground timer and the background service.
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: AppTheme.cardBg,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: AppTheme.border),
+        boxShadow: [
+          BoxShadow(
+            color: AppTheme.primary.withOpacity(0.06),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: AppTheme.primary.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(
+              Icons.timer_outlined,
+              color: AppTheme.primary,
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 16),
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Ready to start your shift',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Accept the terms and tap Start to begin tracking.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Live Map Card ─────────────────────────────────────────────────────────────
 class _LiveMapCard extends StatefulWidget {
   final AnimationController pulseCtrl;
   final String elapsed;
@@ -343,7 +419,6 @@ class _LiveMapCardState extends State<_LiveMapCard>
   final List<LatLng> _route = [];
   StreamSubscription<Position>? _positionSub;
 
-  // Ahmedabad centre as fallback before first GPS fix
   static const LatLng _fallback = LatLng(23.0225, 72.5714);
 
   @override
@@ -356,43 +431,34 @@ class _LiveMapCardState extends State<_LiveMapCard>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // When the user returns to the app after it was minimised, reload the
-    // stored route so any background-tracked points are immediately visible.
-    if (state == AppLifecycleState.resumed) {
-      _loadStoredRoute();
-    }
+    if (state == AppLifecycleState.resumed) _loadStoredRoute();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _positionSub?.cancel();
-    _mapCtrl?.dispose();
+    try {
+      _mapCtrl?.dispose();
+    } catch (_) {}
+    _mapCtrl = null;
     super.dispose();
   }
 
-  // ── Data loading ───────────────────────────────────────────────────────────
-
   Future<void> _loadStoredRoute() async {
-   final points = await LocationStorage.getPoints();
+    final points = await LocationStorage.getPoints();
     if (!mounted || points.isEmpty) return;
-
     final lls = points.map((p) => LatLng(p.lat, p.lng)).toList();
-
     setState(() {
       _route
         ..clear()
         ..addAll(lls);
     });
-
-    // Fit bounds once the map is ready
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_route.length >= 2) {
         _fitBounds();
       } else if (_route.isNotEmpty) {
-        _mapCtrl?.animateCamera(
-          CameraUpdate.newLatLngZoom(_route.last, 16),
-        );
+        _mapCtrl?.animateCamera(CameraUpdate.newLatLngZoom(_route.last, 16));
       }
     });
   }
@@ -401,7 +467,6 @@ class _LiveMapCardState extends State<_LiveMapCard>
     if (!mounted) return;
     final ll = LatLng(pos.latitude, pos.longitude);
     setState(() => _route.add(ll));
-    // Follow the latest position
     _mapCtrl?.animateCamera(CameraUpdate.newLatLng(ll));
   }
 
@@ -412,49 +477,31 @@ class _LiveMapCardState extends State<_LiveMapCard>
     _mapCtrl!.animateCamera(
       CameraUpdate.newLatLngBounds(
         LatLngBounds(
-          southwest: LatLng(
-            lats.reduce(math.min),
-            lngs.reduce(math.min),
-          ),
-          northeast: LatLng(
-            lats.reduce(math.max),
-            lngs.reduce(math.max),
-          ),
+          southwest: LatLng(lats.reduce(math.min), lngs.reduce(math.min)),
+          northeast: LatLng(lats.reduce(math.max), lngs.reduce(math.max)),
         ),
-        60, // padding in logical pixels
+        60,
       ),
     );
   }
-
-  // ── Build ──────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final current = _route.isNotEmpty ? _route.last : _fallback;
     final hasRoute = _route.length >= 2;
 
-    // ── Markers ──────────────────────────────────────────────────────────────
     final markers = <Marker>{};
-
     if (_route.isNotEmpty) {
       markers.add(Marker(
         markerId: const MarkerId('start'),
         position: _route.first,
-        icon:
-        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-        infoWindow: const InfoWindow(
-          title: '🚀 Shift Start',
-          snippet: 'Origin of this shift',
-        ),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+        infoWindow: const InfoWindow(title: '🚀 Shift Start'),
       ));
-    }
-
-    if (_route.isNotEmpty) {
       markers.add(Marker(
         markerId: const MarkerId('current'),
         position: current,
-        icon:
-        BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
         infoWindow: InfoWindow(
           title: '📍 Current Location',
           snippet:
@@ -463,7 +510,6 @@ class _LiveMapCardState extends State<_LiveMapCard>
       ));
     }
 
-    // ── Polyline ─────────────────────────────────────────────────────────────
     final polylines = <Polyline>{
       if (hasRoute)
         Polyline(
@@ -485,7 +531,7 @@ class _LiveMapCardState extends State<_LiveMapCard>
         border: Border.all(color: AppTheme.border),
         boxShadow: [
           BoxShadow(
-            color: AppTheme.primary.withOpacity(0.07),
+            color: AppTheme.primary.withOpacity(0.08),
             blurRadius: 20,
             offset: const Offset(0, 6),
           ),
@@ -494,23 +540,19 @@ class _LiveMapCardState extends State<_LiveMapCard>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // ── Header ─────────────────────────────────────────────────────────
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 12),
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 10),
             child: Row(
               children: [
                 Container(
-                  width: 36,
-                  height: 36,
+                  width: 38,
+                  height: 38,
                   decoration: BoxDecoration(
                     color: AppTheme.success.withOpacity(0.12),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: const Icon(
-                    Icons.location_on_rounded,
-                    color: AppTheme.success,
-                    size: 20,
-                  ),
+                  child: const Icon(Icons.location_on_rounded,
+                      color: AppTheme.success, size: 20),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -520,10 +562,9 @@ class _LiveMapCardState extends State<_LiveMapCard>
                       const Text(
                         'Live Location Tracking',
                         style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
-                          color: AppTheme.textPrimary,
-                        ),
+                            fontWeight: FontWeight.bold,
+                            fontSize: 15,
+                            color: AppTheme.textPrimary),
                       ),
                       Text(
                         _route.isNotEmpty
@@ -531,75 +572,33 @@ class _LiveMapCardState extends State<_LiveMapCard>
                             '${current.longitude.toStringAsFixed(4)}° E'
                             : 'Acquiring GPS fix…',
                         style: const TextStyle(
-                          fontSize: 12,
-                          color: AppTheme.textSecondary,
-                        ),
+                            fontSize: 12, color: AppTheme.textSecondary),
                       ),
                     ],
                   ),
                 ),
-                // LIVE badge
-                Container(
-                  padding:
-                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppTheme.success,
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ScaleTransition(
-                        scale: widget.pulseCtrl,
-                        child: Container(
-                          width: 7,
-                          height: 7,
-                          decoration: const BoxDecoration(
-                            color: Colors.white,
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      const Text(
-                        'LIVE',
-                        style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 10,
-                          fontWeight: FontWeight.w800,
-                          letterSpacing: 1,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+                _LiveBadge(pulseCtrl: widget.pulseCtrl),
               ],
             ),
           ),
-
-          // ── Route stats strip ───────────────────────────────────────────────
           if (_route.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.fromLTRB(20, 0, 20, 10),
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
               child: Row(
                 children: [
                   _StatChip(
-                    icon: Icons.place_rounded,
-                    label: '${_route.length} pts tracked',
-                    color: AppTheme.primary,
-                  ),
+                      icon: Icons.place_rounded,
+                      label: '${_route.length} pts',
+                      color: AppTheme.primary),
                   const SizedBox(width: 8),
                   if (hasRoute)
                     _StatChip(
-                      icon: Icons.route_rounded,
-                      label: '${_approxDistanceKm().toStringAsFixed(2)} km',
-                      color: AppTheme.success,
-                    ),
+                        icon: Icons.route_rounded,
+                        label: '${_approxDistanceKm().toStringAsFixed(2)} km',
+                        color: AppTheme.success),
                 ],
               ),
             ),
-
-          // ── Google Map ─────────────────────────────────────────────────────
           ClipRRect(
             borderRadius:
             const BorderRadius.vertical(bottom: Radius.circular(20)),
@@ -608,18 +607,16 @@ class _LiveMapCardState extends State<_LiveMapCard>
               child: Stack(
                 children: [
                   GoogleMap(
-                    initialCameraPosition: CameraPosition(
-                      target: current,
-                      zoom: 15,
-                    ),
+                    initialCameraPosition:
+                    CameraPosition(target: current, zoom: 15),
                     onMapCreated: (controller) {
+                      if (!mounted) return;
                       _mapCtrl = controller;
                       if (_route.length >= 2) {
                         _fitBounds();
                       } else if (_route.isNotEmpty) {
                         controller.animateCamera(
-                          CameraUpdate.newLatLngZoom(current, 16),
-                        );
+                            CameraUpdate.newLatLngZoom(current, 16));
                       }
                     },
                     markers: markers,
@@ -632,8 +629,6 @@ class _LiveMapCardState extends State<_LiveMapCard>
                     mapType: MapType.normal,
                     padding: const EdgeInsets.only(bottom: 50),
                   ),
-
-                  // "Fit route" floating button
                   if (hasRoute)
                     Positioned(
                       top: 12,
@@ -647,22 +642,16 @@ class _LiveMapCardState extends State<_LiveMapCard>
                             borderRadius: BorderRadius.circular(8),
                             boxShadow: [
                               BoxShadow(
-                                color: Colors.black.withOpacity(0.15),
-                                blurRadius: 6,
-                                offset: const Offset(0, 2),
-                              ),
+                                  color: Colors.black.withOpacity(0.15),
+                                  blurRadius: 6,
+                                  offset: const Offset(0, 2))
                             ],
                           ),
-                          child: const Icon(
-                            Icons.fit_screen_rounded,
-                            size: 18,
-                            color: AppTheme.primary,
-                          ),
+                          child: const Icon(Icons.fit_screen_rounded,
+                              size: 18, color: AppTheme.primary),
                         ),
                       ),
                     ),
-
-                  // Elapsed timer overlay
                   Positioned(
                     bottom: 12,
                     right: 12,
@@ -693,7 +682,6 @@ class _LiveMapCardState extends State<_LiveMapCard>
     );
   }
 
-  /// Haversine distance across all route points (in km).
   double _approxDistanceKm() {
     double total = 0.0;
     for (int i = 1; i < _route.length; i++) {
@@ -703,7 +691,7 @@ class _LiveMapCardState extends State<_LiveMapCard>
   }
 
   double _haversine(LatLng a, LatLng b) {
-    const r = 6371.0; // Earth radius in km
+    const r = 6371.0;
     final dLat = _deg2rad(b.latitude - a.latitude);
     final dLng = _deg2rad(b.longitude - a.longitude);
     final h = math.sin(dLat / 2) * math.sin(dLat / 2) +
@@ -717,17 +705,54 @@ class _LiveMapCardState extends State<_LiveMapCard>
   double _deg2rad(double deg) => deg * (math.pi / 180);
 }
 
-// ── Small stat chip widget ────────────────────────────────────────────────────
+// ── Live Badge ────────────────────────────────────────────────────────────────
+class _LiveBadge extends StatelessWidget {
+  final AnimationController pulseCtrl;
+  const _LiveBadge({required this.pulseCtrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+      decoration: BoxDecoration(
+        color: AppTheme.success,
+        borderRadius: BorderRadius.circular(20),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ScaleTransition(
+            scale: pulseCtrl,
+            child: Container(
+              width: 7,
+              height: 7,
+              decoration: const BoxDecoration(
+                  color: Colors.white, shape: BoxShape.circle),
+            ),
+          ),
+          const SizedBox(width: 5),
+          const Text(
+            'LIVE',
+            style: TextStyle(
+                color: Colors.white,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 1),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Stat Chip ─────────────────────────────────────────────────────────────────
 class _StatChip extends StatelessWidget {
   final IconData icon;
   final String label;
   final Color color;
 
-  const _StatChip({
-    required this.icon,
-    required this.label,
-    required this.color,
-  });
+  const _StatChip(
+      {required this.icon, required this.label, required this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -743,26 +768,23 @@ class _StatChip extends StatelessWidget {
         children: [
           Icon(icon, size: 12, color: color),
           const SizedBox(width: 4),
-          Text(
-            label,
-            style: TextStyle(
-                fontSize: 11, color: color, fontWeight: FontWeight.w600),
-          ),
+          Text(label,
+              style: TextStyle(
+                  fontSize: 11,
+                  color: color,
+                  fontWeight: FontWeight.w600)),
         ],
       ),
     );
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  All widgets below are unchanged from the original home_screen.dart
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ── Top Bar ───────────────────────────────────────────────────────────────────
 class _TopBar extends StatelessWidget {
   final String initial, name, totalLabel, elapsedLabel;
-  final bool termsAccepted, shiftActive;
+  final bool termsAccepted, shiftActive,shiftStarting;
   final ValueChanged<bool?> onTermsChanged;
-  final VoidCallback onShiftStart, onShiftStop, onMenuTap, onAvatarTap;
+  final VoidCallback onShiftStart, onShiftStop, onAvatarTap;
 
   const _TopBar({
     required this.initial,
@@ -770,12 +792,13 @@ class _TopBar extends StatelessWidget {
     required this.totalLabel,
     required this.termsAccepted,
     required this.shiftActive,
+    required this.shiftStarting,
     required this.elapsedLabel,
     required this.onTermsChanged,
     required this.onShiftStart,
     required this.onShiftStop,
-    required this.onMenuTap,
     required this.onAvatarTap,
+
   });
 
   @override
@@ -783,7 +806,7 @@ class _TopBar extends StatelessWidget {
     return Container(
       padding: EdgeInsets.only(
         top: MediaQuery.of(context).padding.top + 8,
-        bottom: 10,
+        bottom: 12,
         left: 8,
         right: 12,
       ),
@@ -803,6 +826,7 @@ class _TopBar extends StatelessWidget {
         children: [
           Row(
             children: [
+              // ── Hamburger menu ─────────────────────────────────────────
               Builder(
                 builder: (ctx) => IconButton(
                   icon: const Icon(Icons.menu_rounded,
@@ -814,63 +838,128 @@ class _TopBar extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 6),
-              Container(
-                width: 26,
-                height: 26,
-                decoration: BoxDecoration(
-                  color: AppTheme.primary,
-                  borderRadius: BorderRadius.circular(7),
+
+              // ── Brand: asset logo + name ─────────────────────────────
+              MediaQuery(
+                data: MediaQuery.of(context)
+                    .copyWith(textScaler: TextScaler.noScaling),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.asset(
+                        'web/icons/Icon.png',
+                        width: 28,
+                        height: 28,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [
+                                AppTheme.primaryDark,
+                                AppTheme.primaryLight
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.location_on_rounded,
+                              color: Colors.white, size: 15),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 7),
+                    const Text(
+                      'APC Track',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                        color: AppTheme.primary,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ],
                 ),
-                child: const Icon(Icons.badge_rounded,
-                    color: Colors.white, size: 14),
               ),
-              const SizedBox(width: 7),
-              const Text(
-                'AP Cabinet',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w800,
-                  color: AppTheme.primary,
-                  letterSpacing: -0.2,
-                ),
-              ),
+
               const Spacer(),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Total Shift Hours',
+
+              // ── Today's hours ──────────────────────────────────────────
+              MediaQuery(
+                data: MediaQuery.of(context)
+                    .copyWith(textScaler: TextScaler.noScaling),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      "Today's Hours",
                       style: TextStyle(
                           fontSize: 9,
                           color: AppTheme.textSecondary,
-                          fontWeight: FontWeight.w500)),
-                  Text(totalLabel,
+                          fontWeight: FontWeight.w500),
+                    ),
+                    Text(
+                      totalLabel,
                       style: const TextStyle(
                           fontSize: 15,
                           fontWeight: FontWeight.bold,
                           color: AppTheme.primary,
-                          letterSpacing: 1.2)),
-                ],
+                          letterSpacing: 1.2),
+                    ),
+                  ],
+                ),
               ),
+
               const SizedBox(width: 10),
+
+              // ── Avatar ─────────────────────────────────────────────────
               GestureDetector(
                 onTap: onAvatarTap,
                 child: CircleAvatar(
-                  radius: 16,
+                  radius: 17,
                   backgroundColor: AppTheme.primary,
-                  child: Text(initial,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold)),
+                  child: Text(
+                    initial,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ],
           ),
+
+          const SizedBox(height: 10),
+
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: Row(
+              children: [
+                Text(
+                  'Hello, $name 👋',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+                const Spacer(),
+              ],
+            ),
+          ),
+
           const SizedBox(height: 8),
+
           _ShiftControl(
             termsAccepted: termsAccepted,
             shiftActive: shiftActive,
+            shiftStarting: shiftStarting,
             elapsedLabel: elapsedLabel,
             onTermsChanged: onTermsChanged,
             onShiftStart: onShiftStart,
@@ -882,8 +971,9 @@ class _TopBar extends StatelessWidget {
   }
 }
 
+// ── Shift Control ─────────────────────────────────────────────────────────────
 class _ShiftControl extends StatelessWidget {
-  final bool termsAccepted, shiftActive;
+  final bool termsAccepted, shiftActive,shiftStarting;
   final String elapsedLabel;
   final ValueChanged<bool?> onTermsChanged;
   final VoidCallback onShiftStart, onShiftStop;
@@ -891,6 +981,7 @@ class _ShiftControl extends StatelessWidget {
   const _ShiftControl({
     required this.termsAccepted,
     required this.shiftActive,
+    required this.shiftStarting,
     required this.elapsedLabel,
     required this.onTermsChanged,
     required this.onShiftStart,
@@ -966,14 +1057,15 @@ class _ShiftControl extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               _ShiftBtn(
-                label: 'Shift Start',
-                active: !shiftActive,
+                label: shiftStarting ? 'Starting…' : 'Start',
+                active: !shiftActive && !shiftStarting,
                 onTap: onShiftStart,
                 activeColor: AppTheme.success,
+                isLoading: shiftStarting,
               ),
               const SizedBox(width: 6),
               _ShiftBtn(
-                label: 'Shift Stop',
+                label: 'Stop',
                 active: shiftActive,
                 onTap: onShiftStop,
                 activeColor: AppTheme.error,
@@ -991,9 +1083,11 @@ class _ShiftControl extends StatelessWidget {
       builder: (_) => AlertDialog(
         shape:
         RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Terms & Conditions',
-            style: TextStyle(
-                fontWeight: FontWeight.bold, color: AppTheme.primary)),
+        title: const Text(
+          'Terms & Conditions',
+          style: TextStyle(
+              fontWeight: FontWeight.bold, color: AppTheme.primary),
+        ),
         content: const SingleChildScrollView(
           child: Text(
             'By starting your shift you agree to:\n\n'
@@ -1002,7 +1096,7 @@ class _ShiftControl extends StatelessWidget {
                 '• You are responsible for accurate timekeeping.\n'
                 '• Location data is used solely for attendance purposes.\n'
                 '• Data is stored securely per company privacy policy.\n\n'
-                'AP Cabinet Staff Management — © 2026',
+                'APC Track — © 2026',
             style: TextStyle(
                 fontSize: 13, color: AppTheme.textSecondary, height: 1.6),
           ),
@@ -1028,6 +1122,7 @@ class _ShiftControl extends StatelessWidget {
 class _ShiftBtn extends StatelessWidget {
   final String label;
   final bool active;
+  final bool isLoading;
   final VoidCallback onTap;
   final Color activeColor;
 
@@ -1036,6 +1131,7 @@ class _ShiftBtn extends StatelessWidget {
     required this.active,
     required this.onTap,
     required this.activeColor,
+    this.isLoading = false,
   });
 
   @override
@@ -1044,8 +1140,7 @@ class _ShiftBtn extends StatelessWidget {
       onTap: active ? onTap : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 250),
-        padding:
-        const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
           color: active ? activeColor : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
@@ -1065,306 +1160,357 @@ class _ShiftBtn extends StatelessWidget {
   }
 }
 
+// ── Timesheet Section ─────────────────────────────────────────────────────────
 class _TimesheetSection extends StatelessWidget {
-  final TextEditingController dateCtrl;
   final List<ShiftGroup> displayed;
-  final VoidCallback onSearch, onReset;
+  final String staffId;
 
   const _TimesheetSection({
-    required this.dateCtrl,
     required this.displayed,
-    required this.onSearch,
-    required this.onReset,
+    required this.staffId,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        color: AppTheme.cardBg,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppTheme.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 16,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: AppTheme.primary.withOpacity(0.1),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Icon(Icons.access_time_filled_rounded,
-                      color: AppTheme.primary, size: 18),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: AppTheme.primary.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.access_time_filled_rounded,
+                  color: AppTheme.primary, size: 18),
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Shift Timesheet',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.textPrimary,
+                  letterSpacing: -0.3,
                 ),
-                const SizedBox(width: 12),
-                const Text('Shift Timesheet',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
-                        color: AppTheme.textPrimary,
-                        letterSpacing: -0.3)),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20),
-            child: Row(
-              children: [
-                Expanded(
-                  child: SizedBox(
-                    height: 44,
-                    child: TextField(
-                      controller: dateCtrl,
-                      decoration: InputDecoration(
-                        hintText: 'Search by date (DD/MM/YYYY)',
-                        hintStyle: const TextStyle(
-                            fontSize: 12, color: AppTheme.textSecondary),
-                        prefixIcon: const Icon(Icons.calendar_today_rounded,
-                            size: 16, color: AppTheme.textSecondary),
-                        contentPadding:
-                        const EdgeInsets.symmetric(vertical: 10),
-                        border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                            borderSide:
-                            const BorderSide(color: AppTheme.border)),
-                        enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                            borderSide:
-                            const BorderSide(color: AppTheme.border)),
-                        focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(10),
-                            borderSide: const BorderSide(
-                                color: AppTheme.primary, width: 2)),
-                        filled: true,
-                        fillColor: Colors.white,
-                      ),
-                      onSubmitted: (_) => onSearch(),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                _FilterBtn(label: 'Search', filled: true, onTap: onSearch),
-                const SizedBox(width: 8),
-                _FilterBtn(label: 'Reset', filled: false, onTap: onReset),
-              ],
-            ),
-          ),
-          const SizedBox(height: 16),
-          Container(
-            padding:
-            const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-            decoration: const BoxDecoration(
-              color: Color(0xFFFAF0F1),
-              border: Border.symmetric(
-                  horizontal: BorderSide(color: AppTheme.border)),
-            ),
-            child: const Row(
-              children: [
-                _ColHead(label: 'Date', flex: 3),
-                _ColHead(label: 'Start Time', flex: 3),
-                _ColHead(label: 'End Time', flex: 3),
-                _ColHead(label: 'Hrs', flex: 2, center: true),
-              ],
-            ),
-          ),
-          if (displayed.isEmpty)
-            const Padding(
-              padding: EdgeInsets.all(40),
-              child: Center(
-                  child: Text('No records found.',
-                      style: TextStyle(
-                          color: AppTheme.textSecondary, fontSize: 14))),
-            )
-          else
-            ...displayed.expand((g) => _buildGroup(context, g)),
-          Container(
-            padding: const EdgeInsets.all(16),
-            alignment: Alignment.center,
-            child: Text(
-              'Copyright © 2026 AP Cabinet. All rights reserved.',
-              style: TextStyle(
-                  fontSize: 11,
-                  color: AppTheme.textSecondary.withOpacity(0.7)),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<Widget> _buildGroup(BuildContext ctx, ShiftGroup group) {
-    final rows = <Widget>[];
-    for (int i = 0; i < group.entries.length; i++) {
-      rows.add(_ShiftRow(
-        date: i == 0 ? group.date : '',
-        entry: group.entries[i],
-        isAlternate: i.isOdd,
-        isLastInGroup: i == group.entries.length - 1,
-      ));
-    }
-    return rows;
-  }
-}
-
-class _FilterBtn extends StatelessWidget {
-  final String label;
-  final bool filled;
-  final VoidCallback onTap;
-  const _FilterBtn(
-      {required this.label, required this.filled, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding:
-        const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
-        decoration: BoxDecoration(
-          color: filled ? AppTheme.primary : Colors.transparent,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: AppTheme.primary),
-        ),
-        child: Text(label,
-            style: TextStyle(
-                color: filled ? Colors.white : AppTheme.primary,
-                fontWeight: FontWeight.w700,
-                fontSize: 13)),
-      ),
-    );
-  }
-}
-
-class _ColHead extends StatelessWidget {
-  final String label;
-  final int flex;
-  final bool center;
-  const _ColHead(
-      {required this.label, this.flex = 1, this.center = false});
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      flex: flex,
-      child: Text(label,
-          textAlign: center ? TextAlign.center : TextAlign.left,
-          style: const TextStyle(
-              fontWeight: FontWeight.w700,
-              fontSize: 12,
-              color: AppTheme.textPrimary,
-              letterSpacing: 0.2)),
-    );
-  }
-}
-
-class _ShiftRow extends StatelessWidget {
-  final String date;
-  final ShiftEntry entry;
-  final bool isAlternate, isLastInGroup;
-
-  const _ShiftRow(
-      {required this.date,
-        required this.entry,
-        required this.isAlternate,
-        required this.isLastInGroup});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding:
-      const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-      decoration: BoxDecoration(
-        color: isAlternate
-            ? const Color(0xFFFCFCFC)
-            : Colors.white,
-        border: isLastInGroup
-            ? const Border(
-            bottom:
-            BorderSide(color: Color(0xFFEEEEEE), width: 1.5))
-            : null,
-      ),
-      child: Row(
-        children: [
-          Expanded(
-              flex: 3,
-              child: Text(date,
-                  style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: AppTheme.textPrimary))),
-          Expanded(
-              flex: 3, child: _TimeCell(time: entry.startTime)),
-          Expanded(
-              flex: 3, child: _TimeCell(time: entry.endTime)),
-          Expanded(
-            flex: 2,
-            child: Center(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 6, vertical: 4),
-                decoration: BoxDecoration(
-                  color: AppTheme.primary.withOpacity(0.08),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(entry.totalHours,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppTheme.primary)),
               ),
             ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        if (displayed.isEmpty)
+          Container(
+            padding: const EdgeInsets.all(40),
+            decoration: BoxDecoration(
+              color: AppTheme.cardBg,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: AppTheme.border),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.inbox_rounded,
+                      size: 40,
+                      color: AppTheme.textSecondary.withOpacity(0.4)),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'No shifts recorded yet',
+                    style: TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 13),
+                  ),
+                ],
+              ),
+            ),
+          )
+        else
+          ...displayed.map(
+                (g) => _ShiftDateGroup(group: g, staffId: staffId),
           ),
-        ],
-      ),
-    );
-  }
-}
 
-class _TimeCell extends StatelessWidget {
-  final String time;
-  const _TimeCell({required this.time});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Flexible(
-            child: Text(time,
-                style: const TextStyle(
-                    fontSize: 11, color: AppTheme.textSecondary))),
-        const SizedBox(width: 3),
-        const Icon(Icons.location_on_rounded,
-            color: AppTheme.primary, size: 12),
+        const SizedBox(height: 8),
+        Center(
+          child: Text(
+            'APC Track © 2026 AP Cabinet',
+            style: TextStyle(
+                fontSize: 11,
+                color: AppTheme.textSecondary.withOpacity(0.5)),
+          ),
+        ),
       ],
     );
   }
 }
 
+// ── Date Group ────────────────────────────────────────────────────────────────
+class _ShiftDateGroup extends StatelessWidget {
+  final ShiftGroup group;
+  final String staffId;
+
+  const _ShiftDateGroup({required this.group, required this.staffId});
+
+  String _formatDisplayDate(String ddmmyyyy) {
+    try {
+      final parts = ddmmyyyy.split('/');
+      if (parts.length != 3) return ddmmyyyy;
+      final dt = DateTime(
+        int.parse(parts[2]),
+        int.parse(parts[1]),
+        int.parse(parts[0]),
+      );
+      const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      ];
+      return '${days[dt.weekday - 1]}, ${dt.day} ${months[dt.month - 1]} ${dt.year}';
+    } catch (_) {
+      return ddmmyyyy;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8, left: 2),
+            child: Row(
+              children: [
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                    color: AppTheme.primary,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  _formatDisplayDate(group.date),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.primary,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Container(height: 1, color: AppTheme.border),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppTheme.primary.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${group.entries.length} shift${group.entries.length == 1 ? '' : 's'}',
+                    style: const TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: AppTheme.primary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ...group.entries
+              .map((e) => _ShiftCard(entry: e, staffId: staffId)),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Shift Card ────────────────────────────────────────────────────────────────
+class _ShiftCard extends StatelessWidget {
+  final ShiftEntry entry;
+  final String staffId;
+
+  const _ShiftCard({required this.entry, required this.staffId});
+
+  DateTime? _parseDateFromEntry(String dateStr) {
+    try {
+      final p = dateStr.split('/');
+      if (p.length != 3) return null;
+      return DateTime(
+          int.parse(p[2]), int.parse(p[1]), int.parse(p[0]));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppTheme.border),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Row(
+          children: [
+            Expanded(
+              child: Row(
+                children: [
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Start',
+                        style: TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.textSecondary,
+                            fontWeight: FontWeight.w500),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        entry.startTime,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.textPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                    child: Row(
+                      children: [
+                        Container(
+                            width: 16,
+                            height: 1,
+                            color: AppTheme.border),
+                        const Icon(Icons.arrow_forward_rounded,
+                            size: 12, color: AppTheme.textSecondary),
+                      ],
+                    ),
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'End',
+                        style: TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.textSecondary,
+                            fontWeight: FontWeight.w500),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        entry.endTime,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.textPrimary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: AppTheme.success.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                        color: AppTheme.success.withOpacity(0.25)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.schedule_rounded,
+                          size: 11, color: AppTheme.success),
+                      const SizedBox(width: 4),
+                      Text(
+                        entry.totalHours,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: AppTheme.success,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => StaffLocationMapScreen(
+                          staffId: staffId,
+                          shiftId: entry.shiftId,
+                          staffName: '',
+                          shiftDate: _parseDateFromEntry(entry.date),
+                        ),
+                      ),
+                    );
+                  },
+                  child: Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: AppTheme.primary.withOpacity(0.08),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: AppTheme.primary.withOpacity(0.2)),
+                    ),
+                    child: const Icon(Icons.map_rounded,
+                        size: 16, color: AppTheme.primary),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ── App Drawer ────────────────────────────────────────────────────────────────
 class _AppDrawer extends StatelessWidget {
   final String name, email, role;
   final VoidCallback onLogout;
 
-  const _AppDrawer(
-      {required this.name,
-        required this.email,
-        required this.role,
-        required this.onLogout});
+  const _AppDrawer({
+    required this.name,
+    required this.email,
+    required this.role,
+    required this.onLogout,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1375,7 +1521,7 @@ class _AppDrawer extends StatelessWidget {
             width: double.infinity,
             padding: EdgeInsets.only(
                 top: MediaQuery.of(context).padding.top + 24,
-                bottom: 24,
+                bottom: 28,
                 left: 20,
                 right: 20),
             decoration: const BoxDecoration(
@@ -1388,27 +1534,69 @@ class _AppDrawer extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                // ── Logo with asset ──────────────────────────────────────
+                Row(
+                  children: [
+                    Container(
+                      width: 28,
+                      height: 28,
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.asset(
+                          'web/icons/Icon.png',
+                          width: 28,
+                          height: 28,
+                          fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) => const Icon(
+                            Icons.location_on_rounded,
+                            color: Colors.white,
+                            size: 16,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'APC Track',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
                 CircleAvatar(
-                  radius: 28,
+                  radius: 30,
                   backgroundColor: Colors.white.withOpacity(0.2),
                   child: Text(
-                      name.isNotEmpty ? name[0].toUpperCase() : 'S',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold)),
-                ),
-                const SizedBox(height: 12),
-                Text(name,
+                    name.isNotEmpty ? name[0].toUpperCase() : 'S',
                     style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold)),
+                        fontSize: 26,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  name,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold),
+                ),
                 if (email.isNotEmpty)
-                  Text(email,
-                      style: TextStyle(
-                          color: Colors.white.withOpacity(0.7),
-                          fontSize: 12)),
+                  Text(
+                    email,
+                    style: TextStyle(
+                        color: Colors.white.withOpacity(0.7), fontSize: 12),
+                  ),
                 const SizedBox(height: 8),
                 Container(
                   padding: const EdgeInsets.symmetric(
@@ -1417,45 +1605,41 @@ class _AppDrawer extends StatelessWidget {
                     color: Colors.white.withOpacity(0.2),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Text(role,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600)),
+                  child: Text(
+                    role,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600),
+                  ),
                 ),
               ],
             ),
           ),
           Expanded(
             child: ListView(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              padding: const EdgeInsets.symmetric(vertical: 12),
               children: [
                 _DrawerItem(
-                    icon: Icons.home_rounded,
-                    label: 'Dashboard',
-                    selected: true,
-                    onTap: () => Navigator.pop(context)),
+                  icon: Icons.dashboard_rounded,
+                  label: 'Dashboard',
+                  selected: true,
+                  onTap: () => Navigator.pop(context),
+                ),
+                const Divider(indent: 20, endIndent: 20, height: 12),
                 _DrawerItem(
-                    icon: Icons.access_time_rounded,
-                    label: 'Shift Timesheet',
-                    onTap: () => Navigator.pop(context)),
-                _DrawerItem(
-                    icon: Icons.location_history_rounded,
-                    label: 'Location History',
-                    onTap: () => Navigator.pop(context)),
-                _DrawerItem(
-                    icon: Icons.person_rounded,
-                    label: 'My Profile',
-                    onTap: () => Navigator.pop(context)),
-                _DrawerItem(
-                    icon: Icons.notifications_rounded,
-                    label: 'Notifications',
-                    onTap: () => Navigator.pop(context)),
-                const Divider(indent: 20, endIndent: 20, height: 24),
-                _DrawerItem(
-                    icon: Icons.help_outline_rounded,
-                    label: 'Help & Support',
-                    onTap: () => Navigator.pop(context)),
+                  icon: Icons.settings_rounded,
+                  label: 'Settings',
+                  onTap: () {
+                    Navigator.pop(context);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => const SettingsScreen()),
+                    );
+                  },
+                ),
+                const Divider(indent: 20, endIndent: 20, height: 28),
                 _DrawerItem(
                   icon: Icons.logout_rounded,
                   label: 'Sign Out',
@@ -1470,10 +1654,12 @@ class _AppDrawer extends StatelessWidget {
           ),
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Text('AP Cabinet Staff v1.0.0',
-                style: TextStyle(
-                    fontSize: 11,
-                    color: AppTheme.textSecondary.withOpacity(0.6))),
+            child: Text(
+              'APC Track v1.0.0',
+              style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSecondary.withOpacity(0.6)),
+            ),
           ),
         ],
       ),
@@ -1487,12 +1673,13 @@ class _DrawerItem extends StatelessWidget {
   final bool selected, isDestructive;
   final VoidCallback onTap;
 
-  const _DrawerItem(
-      {required this.icon,
-        required this.label,
-        required this.onTap,
-        this.selected = false,
-        this.isDestructive = false});
+  const _DrawerItem({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.selected = false,
+    this.isDestructive = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1503,16 +1690,16 @@ class _DrawerItem extends StatelessWidget {
         : AppTheme.textSecondary;
     return ListTile(
       leading: Icon(icon, color: color, size: 22),
-      title: Text(label,
-          style: TextStyle(
-              color: color,
-              fontWeight:
-              selected ? FontWeight.w700 : FontWeight.w500,
-              fontSize: 14)),
-      tileColor:
-      selected ? AppTheme.primary.withOpacity(0.06) : null,
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10)),
+      title: Text(
+        label,
+        style: TextStyle(
+            color: color,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+            fontSize: 14),
+      ),
+      tileColor: selected ? AppTheme.primary.withOpacity(0.06) : null,
+      shape:
+      RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       contentPadding:
       const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
       onTap: onTap,
@@ -1520,16 +1707,16 @@ class _DrawerItem extends StatelessWidget {
   }
 }
 
+// ── Logout Dialog ─────────────────────────────────────────────────────────────
 class _LogoutDialog extends StatelessWidget {
+  const _LogoutDialog();
+
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(20)),
-      contentPadding:
-      const EdgeInsets.fromLTRB(28, 24, 28, 8),
-      actionsPadding:
-      const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      contentPadding: const EdgeInsets.fromLTRB(28, 24, 28, 8),
+      actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
       content: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -1544,16 +1731,20 @@ class _LogoutDialog extends StatelessWidget {
                 color: AppTheme.error, size: 28),
           ),
           const SizedBox(height: 16),
-          const Text('Sign Out?',
-              style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: AppTheme.textPrimary)),
+          const Text(
+            'Sign Out?',
+            style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: AppTheme.textPrimary),
+          ),
           const SizedBox(height: 8),
-          const Text('You will be returned to the login screen.',
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                  fontSize: 13, color: AppTheme.textSecondary)),
+          const Text(
+            'You will be returned to the login screen.',
+            textAlign: TextAlign.center,
+            style:
+            TextStyle(fontSize: 13, color: AppTheme.textSecondary),
+          ),
         ],
       ),
       actions: [

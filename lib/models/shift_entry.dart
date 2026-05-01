@@ -9,12 +9,14 @@ class ShiftEntry {
   final double startLng;
   final double endLat;
   final double endLng;
+  final String shiftId;
 
   const ShiftEntry({
     required this.date,
     required this.startTime,
     required this.endTime,
     required this.totalHours,
+    required this.shiftId,
     this.startLat = 23.0225,
     this.startLng = 72.5714,
     this.endLat = 23.0225,
@@ -29,87 +31,69 @@ class ShiftGroup {
   const ShiftGroup({required this.date, required this.entries});
 }
 
-/// ── Dummy Data ───────────────────────────────────────────────────────────────
-const List<ShiftEntry> kDummyShifts = [
-  ShiftEntry(
-    date: '06/04/2026',
-    startTime: '06:48 PM',
-    endTime: '06:52 PM',
-    totalHours: '00:04',
-  ),
-  ShiftEntry(
-    date: '06/04/2026',
-    startTime: '06:39 PM',
-    endTime: '06:45 PM',
-    totalHours: '00:06',
-  ),
-  ShiftEntry(
-    date: '06/04/2026',
-    startTime: '02:50 PM',
-    endTime: '03:01 PM',
-    totalHours: '00:11',
-  ),
-  ShiftEntry(
-    date: '04/04/2026',
-    startTime: '12:38 AM',
-    endTime: '12:49 AM',
-    totalHours: '00:11',
-  ),
-  ShiftEntry(
-    date: '04/04/2026',
-    startTime: '12:02 AM',
-    endTime: '12:13 AM',
-    totalHours: '00:11',
-  ),
-  ShiftEntry(
-    date: '03/04/2026',
-    startTime: '11:58 PM',
-    endTime: '11:59 PM',
-    totalHours: '00:01',
-  ),
-  ShiftEntry(
-    date: '02/04/2026',
-    startTime: '05:46 PM',
-    endTime: '05:47 PM',
-    totalHours: '00:01',
-  ),
-  ShiftEntry(
-    date: '02/04/2026',
-    startTime: '05:35 PM',
-    endTime: '05:37 PM',
-    totalHours: '00:02',
-  ),
-  ShiftEntry(
-    date: '01/04/2026',
-    startTime: '04:39 PM',
-    endTime: '05:18 PM',
-    totalHours: '00:39',
-  ),
-  ShiftEntry(
-    date: '01/04/2026',
-    startTime: '04:28 PM',
-    endTime: '04:31 PM',
-    totalHours: '00:03',
-  ),
-  ShiftEntry(
-    date: '31/03/2026',
-    startTime: '09:00 AM',
-    endTime: '05:30 PM',
-    totalHours: '08:30',
-  ),
-  ShiftEntry(
-    date: '30/03/2026',
-    startTime: '08:45 AM',
-    endTime: '05:00 PM',
-    totalHours: '08:15',
-  ),
-  ShiftEntry(
-    date: '29/03/2026',
-    startTime: '09:15 AM',
-    endTime: '06:00 PM',
-    totalHours: '08:45',
-  ),
-];
+// Add below your existing ShiftEntry / ShiftGroup classes
+
+class StaffShiftApiModel {
+  final String? shiftId;
+  final DateTime? shiftStart;
+  final DateTime? shiftEnd;
+  final String? shiftStatus;
+
+  const StaffShiftApiModel({
+    this.shiftId,
+    this.shiftStart,
+    this.shiftEnd,
+    this.shiftStatus,
+  });
+
+  factory StaffShiftApiModel.fromJson(Map<String, dynamic> json) {
+    return StaffShiftApiModel(
+      shiftId: json['shiftId'] as String?,
+      shiftStart: json['shiftStart'] != null
+          ? DateTime.tryParse(json['shiftStart'] as String)
+          : null,
+      shiftEnd: json['shiftEnd'] != null
+          ? DateTime.tryParse(json['shiftEnd'] as String)
+          : null,
+      shiftStatus: json['shiftStatus'] as String?,
+    );
+  }
+
+  /// Convert to the ShiftEntry shape used by the UI
+  ShiftEntry toShiftEntry() {
+    final start = shiftStart ?? DateTime(0);
+    final end   = shiftEnd   ?? DateTime(0);
+
+    final diff    = end.difference(start);
+    final hh      = diff.inHours.abs().toString().padLeft(2, '0');
+    final mm      = (diff.inMinutes.abs() % 60).toString().padLeft(2, '0');
+    final totHrs  = '$hh:$mm';
+
+    String _fmt(DateTime dt) {
+      final h  = dt.hour % 12 == 0 ? 12 : dt.hour % 12;
+      final m  = dt.minute.toString().padLeft(2, '0');
+      final ap = dt.hour >= 12 ? 'PM' : 'AM';
+      return '${h.toString().padLeft(2, '0')}:$m $ap';
+    }
+
+    String _fmtDate(DateTime dt) =>
+        '${dt.day.toString().padLeft(2, '0')}/'
+            '${dt.month.toString().padLeft(2, '0')}/'
+            '${dt.year}';
+
+    return ShiftEntry(
+      date:       _fmtDate(start),
+      startTime:  _fmt(start),
+      endTime:    _fmt(end),
+      totalHours: totHrs,
+      shiftId:    shiftId ?? '',
+      startLat:   23.0225,
+      startLng:   72.5714,
+      endLat:     23.0225,
+      endLng:     72.5714,
+    );
+  }
+}
 
 List<ShiftGroup> groupShifts(List<ShiftEntry> entries) {
   final Map<String, List<ShiftEntry>> map = {};

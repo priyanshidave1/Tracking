@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../models/login_request.dart';
 import '../models/register_request.dart';
 import '../models/auth_response.dart';
@@ -9,7 +10,7 @@ import '../utils/constants.dart';
 
 class AuthService {
   final _storage = const FlutterSecureStorage();
-
+  static const String _keyLoginTimestamp = 'login_timestamp_ms';
   // ── LOGIN ──────────────────────────────────────────────
   Future<LoginApiResponse> login(LoginRequest request) async {
     try {
@@ -36,6 +37,7 @@ class AuthService {
           value: response.data!.locationId ?? '',
         );
         await _storage.write(key: 'tenant_id', value: request.tenantIdentifier);
+        await saveLoginTimestamp();
       }
 
       return response;
@@ -45,6 +47,19 @@ class AuthService {
         message: 'Connection error. Please check your network.',
       );
     }
+  }
+
+  Future<void> saveLoginTimestamp() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt(_keyLoginTimestamp, DateTime.now().millisecondsSinceEpoch);
+  }
+
+  Future<bool> isLoginExpired() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ms = prefs.getInt(_keyLoginTimestamp);
+    if (ms == null) return true;
+    final loginTime = DateTime.fromMillisecondsSinceEpoch(ms);
+    return DateTime.now().difference(loginTime).inDays >= 15;
   }
 
   // ── REGISTER ───────────────────────────────────────────
